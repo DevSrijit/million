@@ -118,7 +118,7 @@ function handle(m: { type: string; [k: string]: any }) {
       const dep = sheet.dependents(col, row, 400);
       let reads = pre.refs.length;
       for (const g of pre.ranges) reads += (g.c1 - g.c0 + 1) * Math.max(0, g.r1 - g.r0 + 1);
-      post({ type: "inspect", col, row, input: sheet.getInput(col, row), display: sheet.display(col, row), pre, dep, reads });
+      post({ type: "inspect", id: m.id, col, row, input: sheet.getInput(col, row), display: sheet.display(col, row), pre, dep, reads });
       break;
     }
     case "bench": {

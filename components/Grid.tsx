@@ -31,7 +31,7 @@ const fmtInt = (n: number) => Math.round(n).toLocaleString("en-US");
 const fmtDur = (ms: number) => (ms < 1 ? `${Math.max(1, Math.round(ms * 1000))} µs` : ms < 10 ? `${ms.toFixed(1)} ms` : `${Math.round(ms)} ms`);
 
 type Inspect = {
-  col: number; row: number; input: string; display: string; reads: number;
+  id: number; col: number; row: number; input: string; display: string; reads: number;
   pre: { refs: { col: number; row: number }[]; ranges: { c0: number; c1: number; r0: number; r1: number }[] };
   dep: { count: number; cells: { col: number; row: number }[] };
 };
@@ -68,12 +68,42 @@ function buildAtlas(dpr: number) {
   return { cv, adv, sx, h, dpr };
 }
 
+// Width of text in the cell font, for growing the in-cell editor.
+let measureCtx: CanvasRenderingContext2D | null = null;
+function textWidth(t: string): number {
+  measureCtx ??= document.createElement("canvas").getContext("2d")!;
+  measureCtx.font = FONT;
+  return measureCtx.measureText(t).width;
+}
+
+// References in formula text (A1, $B$2, C3:D9, G:G), for outlining them while the user types.
+function refsIn(text: string, rows: number): { c0: number; c1: number; r0: number; r1: number }[] {
+  const out: { c0: number; c1: number; r0: number; r1: number }[] = [];
+  const col = (x: string) => x.replace(/\$/g, "").toUpperCase().split("").reduce((n, ch) => n * 26 + ch.charCodeAt(0) - 64, 0) - 1;
+  const noStrings = text.replace(/"[^"]*"?/g, (m) => " ".repeat(m.length));
+  const re = /(\$?[A-Za-z]{1,2}\$?\d+)(?::(\$?[A-Za-z]{1,2}\$?\d+))?|(\$?[A-Za-z]{1,2}):(\$?[A-Za-z]{1,2})(?![\w(])/g;
+  for (let m; (m = re.exec(noStrings)); ) {
+    const before = noStrings[m.index - 1];
+    if (before && /[A-Za-z0-9_]/.test(before)) continue; // part of a name like SUMIF
+    if (m[3]) {
+      const a = col(m[3]), b = col(m[4]);
+      out.push({ c0: Math.min(a, b), c1: Math.max(a, b), r0: 0, r1: rows - 1 });
+      continue;
+    }
+    const p = (x: string) => { const mm = /^\$?([A-Za-z]+)\$?(\d+)$/.exec(x)!; return { c: col(mm[1]), r: parseInt(mm[2], 10) - 1 }; };
+    const a = p(m[1]), b = m[2] ? p(m[2]) : a;
+    out.push({ c0: Math.min(a.c, b.c), c1: Math.max(a.c, b.c), r0: Math.min(a.r, b.r), r1: Math.min(rows - 1, Math.max(a.r, b.r)) });
+  }
+  return out.filter((g) => g.c0 >= 0 && g.c1 < COL_W.length && g.r0 >= 0 && g.r0 < rows);
+}
+
 export default function Grid() {
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const vThumbRef = useRef<HTMLDivElement>(null);
   const hThumbRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const editorRef = useRef<HTMLInputElement>(null);
   const workerRef = useRef<Worker | null>(null);
 
   // Mutable render state. React state is only for the bars.
@@ -88,13 +118,24 @@ export default function Grid() {
     frames: 0, missFrames: 0, // frames that drew rows the worker had not sent yet
     vel: 0, vFirst: 0, vT: 0, // scroll speed in rows per ms, for overscan ahead of the motion
     recalcing: false,
+    // In-cell editing, like Excel and Sheets.
+    cellEdit: null as { col: number; row: number } | null,
+    editMode: "enter" as "enter" | "edit", // enter: started by typing (arrows commit); edit: F2 or double-click (arrows move the caret)
+    editText: "",
+    point: null as { start: number; end: number } | null, // the reference that pointing inserted, so the next point replaces it
+    pointCell: null as { col: number; row: number } | null,
+    pendingEdit: false, // a double-click before the cell's input arrived from the worker
+    inspectId: 0,
   }).current;
 
   const [ready, setReady] = useState<Ready | null>(null);
   const [lastEdit, setLastEdit] = useState<(Edited & { name: string }) | null>(null);
   const [recalcing, setRecalcing] = useState<string | null>(null);
   const [startError, setStartError] = useState(false);
-  const [formula, setFormula] = useState("");
+  const [formula, setFormulaState] = useState("");
+  const [cellEdit, setCellEdit] = useState<{ col: number; row: number } | null>(null);
+  // The formula bar and the in-cell editor share one text.
+  const setFormula = (t: string) => { s.editText = t; setFormulaState(t); };
   const [sel, setSel] = useState(s.sel);
   const [inspect, setInspect] = useState<Inspect | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -249,7 +290,24 @@ export default function Grid() {
     ctx.rect(RHDR_W, HEAD_H, s.w - RHDR_W, s.h - HEAD_H);
     ctx.clip();
     const sr = rectOf(s.sel.col, s.sel.row);
-    if (s.arrows && ins && ins.col === s.sel.col && ins.row === s.sel.row) {
+    if (s.cellEdit && s.editText.startsWith("=")) {
+      // While a formula is typed, outline every cell and range it names, like Sheets.
+      ctx.strokeStyle = C.accent;
+      ctx.fillStyle = "rgba(10,108,255,0.07)";
+      for (const g of refsIn(s.editText, s.rows)) {
+        const top = Math.max(g.r0, first), bot = Math.min(g.r1, first + count);
+        const frozen = g.r0 === 0;
+        if (bot < top && !frozen) continue;
+        const x0 = xOf(g.c0), x1 = xOf(g.c1) + COL_W[g.c1];
+        const y0 = frozen ? HEAD_H : yOf(top);
+        const y1 = g.r1 === 0 ? HEAD_H + ROW_H : g.r1 >= first + count ? s.h : yOf(bot) + ROW_H;
+        if (g.r0 !== g.r1 || g.c0 !== g.c1) ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash(g.r0 !== g.r1 || g.c0 !== g.c1 ? [4, 3] : []);
+        ctx.strokeRect(x0 + 1, y0 + 1, x1 - x0 - 2, y1 - y0 - 2);
+      }
+      ctx.setLineDash([]);
+    } else if (s.arrows && ins && ins.col === s.sel.col && ins.row === s.sel.row) {
       ctx.strokeStyle = C.accent;
       ctx.fillStyle = "rgba(10,108,255,0.06)";
       ctx.lineWidth = 1;
@@ -372,6 +430,15 @@ export default function Grid() {
       }
     }
 
+    const ed = editorRef.current;
+    if (ed && s.cellEdit) {
+      const ce = s.cellEdit;
+      const vis = visible(ce.row) && xOf(ce.col) + COL_W[ce.col] > RHDR_W && xOf(ce.col) < s.w;
+      ed.style.visibility = vis ? "visible" : "hidden";
+      ed.style.transform = `translate(${xOf(ce.col)}px, ${yOf(ce.row)}px)`;
+      ed.style.width = `${Math.max(COL_W[ce.col], Math.min(s.w - xOf(ce.col) - 8, textWidth(s.editText) + 20))}px`;
+    }
+
     s.drawMs = s.drawMs * 0.9 + (performance.now() - t0) * 0.1;
     if (heatA > 0) s.raf = requestAnimationFrame(draw);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -391,6 +458,7 @@ export default function Grid() {
     col = Math.min(Math.max(0, col), COL_W.length - 1);
     row = Math.min(Math.max(0, row), s.rows - 1);
     s.sel = { col, row };
+    s.pendingEdit = false;
     setSel(s.sel);
     setError(null);
     s.editing = false;
@@ -404,7 +472,7 @@ export default function Grid() {
     const left = COL_X[col], vw = s.w - RHDR_W;
     if (left < s.scrollX) scrollTo(left, s.scrollY);
     else if (left + COL_W[col] > s.scrollX + vw) scrollTo(left + COL_W[col] - vw, s.scrollY);
-    workerRef.current?.postMessage({ type: "inspect", col, row });
+    workerRef.current?.postMessage({ type: "inspect", id: ++s.inspectId, col, row });
     redraw();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [redraw, scrollTo]);
@@ -455,21 +523,21 @@ export default function Grid() {
           s.body = s.body && { ...s.body, epoch: -1 };
           s.head = s.head && { ...s.head, epoch: -1 };
           requestView();
-          w.postMessage({ type: "inspect", col: s.sel.col, row: s.sel.row });
+          w.postMessage({ type: "inspect", id: ++s.inspectId, col: s.sel.col, row: s.sel.row });
           break;
         case "editError":
-          // Keep the user on the cell, with their text, so they can fix it.
+          // Reopen the cell editor with the user's text, so they can fix it.
           select(m.col, m.row);
-          s.editing = true;
-          setFormula(m.text);
+          startEdit(m.text, "edit");
           setError(`${cellName(m.col, m.row)}: ${m.message}`);
-          inputRef.current?.focus();
           break;
         case "inspect":
-          if (m.col === s.sel.col && m.row === s.sel.row) {
+          // Only the latest request counts: an older reply can describe the cell before an edit.
+          if (m.id === s.inspectId && m.col === s.sel.col && m.row === s.sel.row) {
             s.inspect = m;
             setInspect(m);
             if (!s.editing) setFormula(m.input);
+            if (s.pendingEdit) { s.pendingEdit = false; startEdit(m.input, "edit"); }
             redraw();
           }
           break;
@@ -527,16 +595,135 @@ export default function Grid() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const onPointerDown = (e: React.PointerEvent) => {
+  const cellAt = (clientX: number, clientY: number) => {
     const rect = wrapRef.current!.getBoundingClientRect();
-    const x = e.clientX - rect.left, y = e.clientY - rect.top;
-    if (x < RHDR_W || y < HEAD_H) return;
+    const x = clientX - rect.left, y = clientY - rect.top;
+    if (x < RHDR_W || y < HEAD_H) return null;
     const cx = x - RHDR_W + s.scrollX;
     let col = COL_X.findIndex((x0, i) => cx >= x0 && cx < x0 + COL_W[i]);
     if (col < 0) col = COL_W.length - 1;
     const row = y < HEAD_H + ROW_H ? 0 : 1 + Math.floor((y - HEAD_H - ROW_H + s.scrollY) / ROW_H);
-    select(col, Math.min(row, s.rows - 1));
+    return { col, row: Math.min(row, s.rows - 1) };
+  };
+
+  // ---------- in-cell editing ----------
+
+  const startEdit = (text: string, mode: "enter" | "edit") => {
+    s.cellEdit = { ...s.sel };
+    s.editMode = mode;
+    s.editing = true;
+    s.point = null;
+    s.pointCell = null;
+    setFormula(text);
+    setCellEdit(s.cellEdit);
+    setError(null);
+    // The editor is always mounted, so it takes focus in this same keystroke. Keys typed right
+    // after the first one then land in it, not in the grid.
+    const ed = editorRef.current!;
+    ed.value = text;
+    ed.classList.add("open"); // a hidden input cannot take focus, so show it first
+    draw(); // places the editor on the cell now, not on the next frame
+    ed.focus();
+    ed.setSelectionRange(text.length, text.length);
+  };
+
+  // Ends the in-cell edit. With `save`, writes the text and moves the selection by (dc, dr).
+  const endEdit = (save: boolean, dc = 0, dr = 0) => {
+    const ce = s.cellEdit;
+    if (!ce) return;
+    s.cellEdit = null;
+    s.point = null;
+    s.pointCell = null;
+    setCellEdit(null);
+    const ed = editorRef.current;
+    if (ed) { ed.classList.remove("open"); ed.style.visibility = ""; }
+    s.editing = false;
+    if (save) workerRef.current?.postMessage({ type: "edit", col: ce.col, row: ce.row, text: s.editText });
+    select(ce.col + dc, ce.row + dr);
+    wrapRef.current?.focus();
+  };
+
+  // Pointing (clicks and arrow keys insert references) works where a reference can go next:
+  // right after "=", "(", ",", an operator, or a reference that pointing just inserted.
+  const canPoint = () => {
+    const ed = editorRef.current;
+    if (!ed || !s.editText.startsWith("=")) return false;
+    const caret = ed.selectionStart ?? s.editText.length;
+    if (s.point && s.point.end === caret) return true;
+    return /[=(,+\-*/^&<>:]\s*$/.test(s.editText.slice(0, caret));
+  };
+
+  const insertRef = (ref: string) => {
+    const ed = editorRef.current!;
+    const caret = ed.selectionStart ?? s.editText.length;
+    const [a, b] = s.point && s.point.end === caret ? [s.point.start, s.point.end] : [caret, ed.selectionEnd ?? caret];
+    const text = s.editText.slice(0, a) + ref + s.editText.slice(b);
+    s.point = { start: a, end: a + ref.length };
+    setFormula(text);
+    redraw();
+    requestAnimationFrame(() => { ed.focus(); ed.setSelectionRange(a + ref.length, a + ref.length); });
+  };
+
+  const onPointerDown = (e: React.PointerEvent) => {
+    if (e.target === editorRef.current) return;
+    const cell = cellAt(e.clientX, e.clientY);
+    if (!cell) return;
+    if (s.cellEdit) {
+      if (canPoint()) {
+        // Point mode: the click inserts a reference, a drag makes it a range. Focus stays in the editor.
+        e.preventDefault();
+        const anchor = cell;
+        s.pointCell = cell;
+        insertRef(cellName(cell.col, cell.row));
+        const move = (ev: PointerEvent) => {
+          const c2 = cellAt(ev.clientX, ev.clientY);
+          if (!c2) return;
+          const c0 = Math.min(anchor.col, c2.col), c1 = Math.max(anchor.col, c2.col);
+          const r0 = Math.min(anchor.row, c2.row), r1 = Math.max(anchor.row, c2.row);
+          const ref = c0 === c1 && r0 === r1 ? cellName(c0, r0) : `${cellName(c0, r0)}:${cellName(c1, r1)}`;
+          if (s.point && s.editText.slice(s.point.start, s.point.end) !== ref) insertRef(ref);
+        };
+        const up = () => { window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up); };
+        window.addEventListener("pointermove", move);
+        window.addEventListener("pointerup", up);
+        return;
+      }
+      // A click elsewhere saves the edit, like Excel.
+      endEdit(true);
+    }
+    select(cell.col, cell.row);
     wrapRef.current!.focus();
+  };
+
+  const onDoubleClick = (e: React.MouseEvent) => {
+    if (s.cellEdit || e.target === editorRef.current) return;
+    const cell = cellAt(e.clientX, e.clientY);
+    if (!cell) return;
+    const ins = s.inspect;
+    if (ins && ins.id === s.inspectId && ins.col === cell.col && ins.row === cell.row) startEdit(ins.input, "edit");
+    else s.pendingEdit = true; // the input arrives with the inspect reply
+  };
+
+  const onEditorKey = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    const k = e.key;
+    if (k === "Enter") { e.preventDefault(); endEdit(true, 0, e.shiftKey ? -1 : 1); return; }
+    if (k === "Tab") { e.preventDefault(); endEdit(true, e.shiftKey ? -1 : 1, 0); return; }
+    if (k === "Escape") { e.preventDefault(); endEdit(false); return; }
+    if (k === "F2") { e.preventDefault(); s.editMode = s.editMode === "edit" ? "enter" : "edit"; return; }
+    const dir: Record<string, [number, number]> = { ArrowUp: [0, -1], ArrowDown: [0, 1], ArrowLeft: [-1, 0], ArrowRight: [1, 0] };
+    const d = dir[k];
+    if (!d) return;
+    if (canPoint()) {
+      // Arrow keys point at a cell, starting from the cell being edited.
+      e.preventDefault();
+      const from = s.pointCell ?? s.cellEdit!;
+      const next = { col: Math.min(Math.max(0, from.col + d[0]), COL_W.length - 1), row: Math.min(Math.max(0, from.row + d[1]), s.rows - 1) };
+      s.pointCell = next;
+      insertRef(cellName(next.col, next.row));
+      return;
+    }
+    // Typing mode: an arrow saves and moves, like Excel. Edit mode: the arrow moves the caret.
+    if (s.editMode === "enter") { e.preventDefault(); endEdit(true, d[0], d[1]); }
   };
 
   const dragThumb = (axis: "x" | "y") => (e: React.PointerEvent) => {
@@ -558,6 +745,7 @@ export default function Grid() {
 
   const commit = (move: number) => {
     setError(null);
+    if (s.cellEdit) { endEdit(true, 0, move); return; }
     s.editing = false;
     workerRef.current?.postMessage({ type: "edit", col: s.sel.col, row: s.sel.row, text: formula });
     if (move) select(s.sel.col, s.sel.row + move);
@@ -579,17 +767,29 @@ export default function Grid() {
       workerRef.current?.postMessage({ type: e.shiftKey ? "redo" : "undo" });
       return;
     }
-    if (e.key === "Enter") { e.preventDefault(); inputRef.current?.focus(); return; }
+    if (e.key === "Enter" || e.key === "F2") {
+      e.preventDefault();
+      const ins = s.inspect;
+      if (ins && ins.id === s.inspectId && ins.col === col && ins.row === row) startEdit(ins.input, "edit");
+      else s.pendingEdit = true; // the input arrives with the inspect reply
+      return;
+    }
     if (e.key === "Backspace" || e.key === "Delete") {
       e.preventDefault();
       workerRef.current?.postMessage({ type: "edit", col, row, text: "" });
       return;
     }
-    if (e.key.length === 1 && !jump && !e.altKey) {
+    if (s.cellEdit && e.key.length === 1 && !jump) {
+      // Safety net: a key that reached the grid while an edit is open belongs to the edit.
       e.preventDefault();
-      s.editing = true;
-      setFormula(e.key);
-      inputRef.current?.focus();
+      setFormula(s.editText + e.key);
+      editorRef.current?.focus();
+      return;
+    }
+    if (e.key.length === 1 && !jump && !e.altKey) {
+      // Typing replaces the cell, like Excel. The editor opens with that first character.
+      e.preventDefault();
+      startEdit(e.key, "enter");
     }
   };
 
@@ -602,7 +802,7 @@ export default function Grid() {
   };
 
   // Guided demo: one click per idea, so a visitor sees the engine work without knowing what to type.
-  const [guide, setGuide] = useState("Every number here is live. Click any cell, type a value or a formula, and press Return. Or try one:");
+  const [guide, setGuide] = useState("Every number here is live. Double-click a cell to edit it, or just start typing. In a formula, click cells to add them. Or try one:");
   const taxStep = useRef(0);
   const TRY = [
     {
@@ -686,8 +886,30 @@ export default function Grid() {
         </div>
       </div>
 
-      <div className="gridwrap" ref={wrapRef} tabIndex={0} onKeyDown={onGridKey} onPointerDown={onPointerDown}>
+      <div className="gridwrap" ref={wrapRef} tabIndex={0} onKeyDown={(e) => { if (e.target === wrapRef.current) onGridKey(e); }} onPointerDown={onPointerDown} onDoubleClick={onDoubleClick}>
         <canvas ref={canvasRef} />
+        {(
+          <input
+            ref={editorRef}
+            className={cellEdit ? "celledit open" : "celledit"}
+            tabIndex={cellEdit ? 0 : -1}
+            value={cellEdit ? formula : ""}
+            spellCheck={false}
+            autoComplete="off"
+            aria-label={cellEdit ? `Edit ${cellName(cellEdit.col, cellEdit.row)}` : undefined}
+            aria-hidden={!cellEdit}
+            onChange={(e) => {
+              s.point = null; // typing ends the pointed reference
+              setFormula(e.target.value);
+              redraw();
+            }}
+            onKeyDown={onEditorKey}
+            onBlur={(e) => {
+              // Moving into the formula bar keeps the edit open. Anywhere else saves it.
+              if (s.cellEdit && e.relatedTarget !== inputRef.current) endEdit(true);
+            }}
+          />
+        )}
         <div className="thumb v" ref={vThumbRef} onPointerDown={dragThumb("y")} />
         <div className="thumb h" ref={hThumbRef} onPointerDown={dragThumb("x")} />
         {!ready && (
