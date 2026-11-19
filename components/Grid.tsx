@@ -93,6 +93,7 @@ export default function Grid() {
   const [ready, setReady] = useState<Ready | null>(null);
   const [lastEdit, setLastEdit] = useState<(Edited & { name: string }) | null>(null);
   const [recalcing, setRecalcing] = useState<string | null>(null);
+  const [startError, setStartError] = useState(false);
   const [formula, setFormula] = useState("");
   const [sel, setSel] = useState(s.sel);
   const [inspect, setInspect] = useState<Inspect | null>(null);
@@ -484,6 +485,9 @@ export default function Grid() {
           break;
       }
     };
+    // If the worker script is blocked or fails to load (for example a stale cached copy without
+    // the COEP header), say so instead of showing "Building…" for ever.
+    w.onerror = () => setStartError(true);
     w.postMessage({ type: "init", orders: ORDERS });
     return () => w.terminate();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -686,7 +690,17 @@ export default function Grid() {
         <canvas ref={canvasRef} />
         <div className="thumb v" ref={vThumbRef} onPointerDown={dragThumb("y")} />
         <div className="thumb h" ref={hThumbRef} onPointerDown={dragThumb("x")} />
-        {!ready && <div className="loading">Building {fmtInt(ORDERS)} orders and 4,000,000 formulas…</div>}
+        {!ready && (
+          <div className="loading">
+            {startError ? (
+              <span>
+                The engine could not start. <button className="reload" onClick={() => location.reload()}>Reload the page</button>
+              </span>
+            ) : (
+              <>Building {fmtInt(ORDERS)} orders and 4,000,000 formulas…</>
+            )}
+          </div>
+        )}
       </div>
 
       <footer className="status">
