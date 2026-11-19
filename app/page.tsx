@@ -27,7 +27,7 @@ const IDEAS = [
   {
     title: "Work in slices",
     body: "A big edit runs on a worker in 8 ms slices. Between slices the grid keeps scrolling, and cells update in place as they finish.",
-    code: `${FACTS.bigCells} cells · 8 ms slices`,
+    code: "run 8 ms → yield → repeat",
   },
 ];
 
@@ -95,12 +95,10 @@ export default function Landing() {
       </section>
 
       <section className={css.section} id="how">
-        <p className={css.eyebrow}>How it works</p>
         <h2>Four ideas, no shortcuts.</h2>
         <div className={css.ideas}>
-          {IDEAS.map((idea, i) => (
+          {IDEAS.map((idea) => (
             <article key={idea.title} className={css.idea}>
-              <span className={css.index}>{String(i + 1).padStart(2, "0")}</span>
               <h3>{idea.title}</h3>
               <p>{idea.body}</p>
               <code>{idea.code}</code>
@@ -110,7 +108,6 @@ export default function Landing() {
       </section>
 
       <section className={css.section} id="compare">
-        <p className={css.eyebrow}>Compare</p>
         <h2>The same ledger in HyperFormula.</h2>
         <p className={css.sectionLede}>
           HyperFormula is the strongest open-source JavaScript formula engine. Both engines ran the same million-order ledger on the

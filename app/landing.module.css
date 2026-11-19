@@ -72,13 +72,11 @@
 }
 
 .section { max-width: 1120px; margin: 144px auto 0; }
-.eyebrow { margin: 0 0 10px; font-size: 13px; font-weight: 600; color: #0a6cff; letter-spacing: -0.005em; }
 .section h2, .closing h2 { margin: 0; font-size: clamp(30px, 4.4vw, 48px); line-height: 1.06; font-weight: 600; letter-spacing: -0.03em; }
 .sectionLede { max-width: 640px; margin: 18px 0 0; font-size: 17px; line-height: 1.5; color: var(--soft); }
 
 .ideas { margin-top: 44px; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; }
 .idea { display: flex; flex-direction: column; gap: 10px; padding: 22px; border-radius: 16px; background: #f5f5f7; }
-.index { font-size: 12px; color: var(--soft); font-variant-numeric: tabular-nums; }
 .idea h3 { margin: 0; font-size: 19px; font-weight: 600; letter-spacing: -0.015em; line-height: 1.2; }
 .idea p { margin: 0; font-size: 14px; line-height: 1.5; color: var(--soft); flex: 1; }
 .idea code { font: 12px ui-monospace, "SF Mono", Menlo, monospace; color: var(--ink); background: #fff; border-radius: 8px; padding: 9px 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
