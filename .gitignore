@@ -6,5 +6,6 @@ next-env.d.ts
 .vercel
 .env*
 
-# Private notes, kept on disk only.
+# Internal plans, briefs and design notes stay on disk. Only user-facing docs and assets go in git.
 docs/*.md
+PRODUCT.md
