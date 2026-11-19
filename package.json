@@ -6,7 +6,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "test": "bun test engine",
+    "test": "bun test engine components",
     "bench": "bun bench/engine.ts"
   },
   "dependencies": {
