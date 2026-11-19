@@ -70,3 +70,5 @@ button { font: inherit; }
 /* In-cell editor: sits on the cell, grows with the text, like Excel and Sheets. */
 .celledit:not(.open) { visibility: hidden; pointer-events: none; }
 .celledit { position: absolute; left: 0; top: 0; height: 26px; z-index: 2; margin: 0; padding: 0 7px; border: 2px solid var(--accent); border-radius: 0; background: var(--bg); color: var(--text); font: 13px var(--font); outline: none; box-shadow: 0 4px 14px rgb(0 0 0 / 0.12); }
+.bar .home { font-weight: 600; letter-spacing: -0.01em; color: var(--text); text-decoration: none; padding-right: 16px; border-right: 1px solid var(--line); }
+.bar .home:hover { color: var(--accent); }

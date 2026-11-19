@@ -24,7 +24,7 @@ export type GridTheme = {
   error: string; frozenLine: string; skeleton: string; font: string; mono: string;
 };
 const SF = '-apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif';
-export const THEMES: Record<"numbers" | "ink" | "paper", GridTheme> = {
+export const THEMES: Record<"numbers" | "ink", GridTheme> = {
   numbers: {
     name: "numbers", bg: "#ffffff", line: "#ebebed", headBg: "#f9f9fa", headText: "#8a8a8e", headSel: "#1d1d1f",
     text: "#1d1d1f", muted: "#8a8a8e", accent: "#0a6cff", accentRgb: "10,108,255", onAccent: "#ffffff",
@@ -34,11 +34,6 @@ export const THEMES: Record<"numbers" | "ink" | "paper", GridTheme> = {
     name: "ink", bg: "#0a0a0b", line: "#1c1c1f", headBg: "#0e0e10", headText: "#636366", headSel: "#f5f5f7",
     text: "#ededf0", muted: "#7c7c80", accent: "#f5f5f7", accentRgb: "245,245,247", onAccent: "#0a0a0b",
     error: "#ff453a", frozenLine: "#2c2c30", skeleton: "#161618", font: SF, mono: 'ui-monospace, "SF Mono", Menlo, monospace',
-  },
-  paper: {
-    name: "paper", bg: "#fbfaf6", line: "#ebe7dc", headBg: "#f5f2ea", headText: "#9a9285", headSel: "#1c1a17",
-    text: "#1c1a17", muted: "#8f877a", accent: "#1f6f50", accentRgb: "31,111,80", onAccent: "#fbfaf6",
-    error: "#b3261e", frozenLine: "#ddd6c7", skeleton: "#f0ece2", font: SF, mono: 'ui-monospace, "SF Mono", Menlo, monospace',
   },
 };
 const C: GridTheme = { ...THEMES.numbers };
@@ -134,9 +129,11 @@ type GridProps = {
   // Embed only: change the tax rate every few seconds until the visitor touches the grid.
   autoplay?: boolean;
   title?: string;
+  // App only: a link back to the landing page, shown before the title.
+  home?: { href: string; label: string };
 };
 
-export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant = "app", autoplay = false, title = "Sales ledger" }: GridProps) {
+export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant = "app", autoplay = false, title = "Sales ledger", home }: GridProps) {
   applyTheme(theme);
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -922,6 +919,7 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
       } as React.CSSProperties}
     >
       <header className="bar">
+        {home && variant === "app" && <a className="home" href={home.href}>{home.label}</a>}
         <div className="title">
           <span className="name">{title}</span>
           <span className="meta">{ready ? `${fmtInt(orders)} orders · ${fmtInt(ready.formulas)} formulas` : "Loading"}</span>
