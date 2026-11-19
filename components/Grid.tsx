@@ -164,6 +164,7 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
     pendingEdit: false, // a double-click before the cell's input arrived from the worker
     touched: false, // the visitor used the grid: autoplay stops
     pageScrollAt: 0, wheelLast: 0, gridGesture: false, // embed wheel routing, per gesture
+    wheelAxis: 0, axisDx: 0, axisDy: 0, // the axis this wheel gesture is locked to
     inspectId: 0,
   }).current;
 
@@ -232,7 +233,7 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
     const atlas = s.atlas;
     s.frames++;
     if (!s.body || s.body.r0 > first || s.body.r1 < Math.min(s.rows, first + count)) s.missFrames++;
-    (window as unknown as { __grid: object }).__grid = { frames: s.frames, missFrames: s.missFrames, drawMs: s.drawMs };
+    (window as unknown as { __grid: object }).__grid = { frames: s.frames, missFrames: s.missFrames, drawMs: s.drawMs, scrollX: s.scrollX, scrollY: s.scrollY };
 
     const drawNumber = (text: string, right: number, y: number) => {
       let x = right;
@@ -636,16 +637,27 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
     window.addEventListener("scroll", onPageScroll, { passive: true });
     const onWheel = (e: WheelEvent) => {
       const now = performance.now();
+      const fresh = now - s.wheelLast > 160; // a new gesture
+      s.wheelLast = now;
+      let dx = e.shiftKey ? e.deltaY : e.deltaX;
+      let dy = e.shiftKey ? 0 : e.deltaY;
+      // Axis lock, like native scroll views: a trackpad swipe always carries some sideways motion.
+      // Each gesture takes the axis of its first clear movement and ignores the other one.
+      if (fresh) { s.wheelAxis = 0; s.axisDx = 0; s.axisDy = 0; }
+      if (s.wheelAxis === 0) {
+        s.axisDx += Math.abs(dx);
+        s.axisDy += Math.abs(dy);
+        if (s.axisDx + s.axisDy > 4) s.wheelAxis = s.axisDx > s.axisDy * 1.5 ? 1 : 2; // 1 = x, 2 = y
+      }
+      if (s.wheelAxis === 1) dy = 0; else dx = 0; // until the axis is known, scroll only vertically
       if (variant === "embed") {
-        if (now - s.wheelLast > 160) s.gridGesture = s.touched || now - s.pageScrollAt > 200;
-        s.wheelLast = now;
+        if (fresh) s.gridGesture = s.touched || now - s.pageScrollAt > 200;
         if (!s.gridGesture) return;
-        const vertical = Math.abs(e.deltaY) > Math.abs(e.deltaX) && !e.shiftKey;
-        if (vertical && ((e.deltaY < 0 && s.scrollY <= 0) || (e.deltaY > 0 && s.scrollY >= maxY()))) return;
+        if (dx === 0 && ((dy < 0 && s.scrollY <= 0) || (dy > 0 && s.scrollY >= maxY()))) return;
       }
       e.preventDefault();
       const k = e.deltaMode === 1 ? ROW_H : e.deltaMode === 2 ? viewH() : 1;
-      scrollTo(s.scrollX + (e.shiftKey ? e.deltaY : e.deltaX) * k, s.scrollY + (e.shiftKey ? 0 : e.deltaY) * k);
+      scrollTo(s.scrollX + dx * k, s.scrollY + dy * k);
     };
     wrap.addEventListener("wheel", onWheel, { passive: false });
     return () => {
