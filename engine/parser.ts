@@ -214,3 +214,16 @@ export function printFormula(n: Node, hostCol: number, hostRow: number): string 
   };
   return "=" + go(n, 0);
 }
+
+// Moves a formula from one cell to another, like Excel's copy and paste: relative references shift
+// by the distance moved, absolute ones ($) stay. Values and invalid formulas come back unchanged.
+// A reference shifted off the sheet prints as #REF, which then fails to parse: the caller stores it
+// as text, so nothing is lost.
+export function shiftFormula(input: string, fromCol: number, fromRow: number, toCol: number, toRow: number): string {
+  if (!input.startsWith("=") || input.length < 2) return input;
+  try {
+    return printFormula(parseFormula(input.slice(1), fromCol, fromRow), toCol, toRow);
+  } catch {
+    return input;
+  }
+}

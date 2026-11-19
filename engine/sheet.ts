@@ -429,26 +429,60 @@ export class Sheet {
 
   // Writes input and marks dependents, but evaluates nothing yet. Call step() to do the work.
   beginInput(c: number, r: number, text: string) {
+    this.beginInputs([[c, r, text]]);
+  }
+
+  // Writes many cells (a paste, a cleared range) as one edit: one dirty-marking pass and one recalc.
+  // A formula that does not parse throws ParseError and nothing changes, unless `lenient` is set: then
+  // it is stored as text, so a pasted block never loses a cell.
+  beginInputs(cells: [number, number, string][], lenient = false) {
     this.finish();
-    const tpl = text.startsWith("=") && text.length > 1 ? this.template(parseFormula(text.slice(1), c, r), c) : null;
-    const k = tpl ? this.formulaCol(c) : this.col(c);
-    if (k.f && k.f[r] !== 0) { this.unhost(this.templates[k.f[r] - 1]); k.f[r] = 0; k.st![r] = CLEAN; }
+    // Parse everything first, so a bad formula changes nothing.
+    const parsed: (Template | null)[] = cells.map(([c, r, text]) => {
+      if (!(text.startsWith("=") && text.length > 1)) return null;
+      try { return this.template(parseFormula(text.slice(1), c, r), c); }
+      catch (e) { if (lenient && e instanceof ParseError) return null; throw e; }
+    });
     this.startRun();
-    if (tpl) {
-      k.f![r] = tpl.id + 1;
-      this.host(tpl, r);
-      this.markDirty(k, c, r);
-    } else {
-      this.writeConstant(k, c, r, text);
-      if (k.stamp) k.stamp[r] = this.epoch;
-      this.queue.push(c * this.rows + r);
-    }
+    cells.forEach(([c, r, text], i) => {
+      if (c < 0 || c >= this.cols || r < 0 || r >= this.rows) return;
+      const tpl = parsed[i];
+      const k = tpl ? this.formulaCol(c) : this.col(c);
+      if (k.f && k.f[r] !== 0) { this.unhost(this.templates[k.f[r] - 1]); k.f[r] = 0; k.st![r] = CLEAN; }
+      if (tpl) {
+        k.f![r] = tpl.id + 1;
+        this.host(tpl, r);
+        if (k.st![r] !== DIRTY) this.markDirty(k, c, r);
+      } else {
+        // A formula that failed to parse in lenient mode is kept as its text.
+        if (text.startsWith("=") && text.length > 1) this.put(k, c, r, STR, this.intern(text));
+        else this.writeConstant(k, c, r, text);
+        if (k.stamp) k.stamp[r] = this.epoch;
+        this.queue.push(c * this.rows + r);
+      }
+    });
     const q = this.queue;
     for (let i = 0; i < q.n; i++) {
       const id = q.a[i];
       const cc = (id / this.rows) | 0;
       this.markDependents(cc, id - cc * this.rows);
     }
+  }
+
+  setInputs(cells: [number, number, string][], lenient = false): RecalcStats {
+    this.beginInputs(cells, lenient);
+    return this.step()!;
+  }
+
+  // The inputs (formula text or value) of a block, row by row. Used by copy.
+  inputsIn(c0: number, r0: number, c1: number, r1: number): string[][] {
+    const out: string[][] = [];
+    for (let r = r0; r <= r1; r++) {
+      const row: string[] = [];
+      for (let c = c0; c <= c1; c++) row.push(this.getInput(c, r));
+      out.push(row);
+    }
+    return out;
   }
 
   private writeConstant(k: Column, c: number, r: number, text: string) {
