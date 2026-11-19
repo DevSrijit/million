@@ -8,6 +8,7 @@ import type { ViewReply } from "@/engine/worker";
 import { formatNumber, type NumFormat } from "@/engine/format";
 import { lockAxis, newAxisState } from "./axis-lock";
 import { Cancelled, runPilot, type PilotApi } from "./autopilot";
+import { momentum, panEnd, panMove, panStart } from "./touch-pan";
 
 const ERRS = ["#DIV/0!", "#VALUE!", "#REF!", "#NAME?", "#NUM!", "#N/A", "#CYCLE!"];
 type SharedCol = { v: Float64Array; t: Uint8Array; f: Int32Array | null; st: Uint8Array | null; stamp: Uint32Array | null };
@@ -256,6 +257,8 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
     pilotStop: null as null | (() => void), // cancels the autopilot and discards its half-typed text
     pilotWait: null as null | (() => void), // resolves when the engine finishes the autopilot's edit
     inView: true, // the grid is on screen: the autopilot pauses when it is not
+    fling: 0, // the requestAnimationFrame id of touch momentum
+    lastTap: { col: -1, row: -1, t: 0 }, // for double-tap to edit
     gridFocused: false, // the selection draws in the accent only while the grid has focus
     corner: { col: 0, row: 1 }, // the moving end of the range; the active cell (sel) stays put, like Excel
     copied: null as { c0: number; r0: number; c1: number; r1: number } | null, // dashed outline after a copy
@@ -1112,6 +1115,76 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
     window.addEventListener("pointerup", up);
   };
 
+  // Touch: a drag pans the grid with momentum, a tap selects, a double-tap edits. In the hero, the
+  // grid takes vertical swipes only after the visitor taps it (CSS touch-action: pan-y until then),
+  // so a swipe on the way down the page still scrolls the page and leaves the autopilot running.
+  const take = () => {
+    if (s.touched && wrapRef.current?.classList.contains("taken")) return;
+    s.pilotStop?.();
+    s.touched = true;
+    wrapRef.current?.classList.add("taken");
+  };
+  const stopFling = () => { if (s.fling) { cancelAnimationFrame(s.fling); s.fling = 0; } };
+  const onTouchDown = (e: React.PointerEvent) => {
+    stopFling();
+    const el = wrapRef.current!;
+    try { el.setPointerCapture(e.pointerId); } catch { /* the pointer is gone */ }
+    const p = panStart(e.clientX, e.clientY, e.timeStamp, s.scrollX, s.scrollY);
+    const id = e.pointerId;
+    const move = (ev: PointerEvent) => {
+      if (ev.pointerId !== id) return; // a second finger does not move the grid
+      const at = panMove(p, ev.clientX, ev.clientY, ev.timeStamp);
+      if (!at) return;
+      // A hero the visitor has not taken answers only sideways drags. Anything with a vertical
+      // part belongs to the page, which takes it a few events later (pointercancel).
+      if (variant === "embed" && !el.classList.contains("taken") && p.mode !== "x") return;
+      take();
+      scrollTo(at.sx, at.sy);
+    };
+    const done = (ev: PointerEvent) => {
+      if (ev.pointerId !== id) return;
+      el.removeEventListener("pointermove", move);
+      el.removeEventListener("pointerup", done);
+      el.removeEventListener("pointercancel", done);
+      if (ev.type === "pointercancel") return; // the page took the gesture
+      const end = panEnd(p, ev.timeStamp);
+      if (!end.tap) {
+        if (!el.classList.contains("taken") && variant === "embed") return; // the page had it
+        let v = { vx: end.vx, vy: end.vy }, last = performance.now();
+        const step = (now: number) => {
+          const m = momentum(v.vx, v.vy, Math.min(50, now - last));
+          last = now;
+          const bx = s.scrollX, by = s.scrollY;
+          if (m) scrollTo(s.scrollX + m.dx, s.scrollY + m.dy);
+          // Stop at the end of the sheet, or when the speed is spent.
+          if (!m || (s.scrollX === bx && s.scrollY === by)) { s.fling = 0; return; }
+          v = m;
+          s.fling = requestAnimationFrame(step);
+        };
+        s.fling = requestAnimationFrame(step);
+        return;
+      }
+      const cell = cellAt(ev.clientX, ev.clientY);
+      if (!cell) return;
+      take();
+      if (s.cellEdit) endEdit(true);
+      const t = ev.timeStamp, lt = s.lastTap;
+      s.lastTap = { col: cell.col, row: cell.row, t };
+      if (lt.col === cell.col && lt.row === cell.row && t - lt.t < 350 && cell.row === s.sel.row && cell.col === s.sel.col) {
+        // A double-tap edits, like a double-click. The on-screen keyboard opens.
+        const ins = s.inspect;
+        if (ins && ins.id === s.inspectId && ins.col === cell.col && ins.row === cell.row) startEdit(ins.input, "edit");
+        else s.pendingEdit = true;
+        return;
+      }
+      select(cell.col, cell.row);
+      el.focus({ preventScroll: true });
+    };
+    el.addEventListener("pointermove", move);
+    el.addEventListener("pointerup", done);
+    el.addEventListener("pointercancel", done);
+  };
+
   const onDoubleClick = (e: React.MouseEvent) => {
     if (s.cellEdit || e.target === editorRef.current) return;
     const cell = cellAt(e.clientX, e.clientY);
@@ -1595,7 +1668,7 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
       onDragLeave={(e) => { if (e.currentTarget === e.target || !e.currentTarget.contains(e.relatedTarget as Node)) setDragOver(false); }}
       onDrop={(e) => { if (variant !== "app") return; e.preventDefault(); setDragOver(false); openFile(e.dataTransfer.files?.[0]); }}
       ref={rootRef}
-      onPointerDownCapture={() => s.pilotStop?.()}
+      onPointerDownCapture={(e) => { if (e.pointerType !== "touch") s.pilotStop?.(); }}
       onKeyDownCapture={() => s.pilotStop?.()}
       onFocusCapture={() => s.pilotStop?.()}
       className={`app ${variant} theme-${theme.name}`}
@@ -1719,7 +1792,12 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
         onFocus={() => { s.gridFocused = true; setGridFocused(true); redraw(); }}
         onBlur={() => { s.gridFocused = false; setGridFocused(false); redraw(); }}
         onKeyDown={(e) => { s.touched = true; if (e.target === wrapRef.current) onGridKey(e); }}
-        onPointerDown={(e) => { s.touched = true; onPointerDown(e); }}
+        onPointerDown={(e) => {
+          if (e.pointerType === "touch" && e.target !== editorRef.current && !(s.cellEdit && canPoint())) { onTouchDown(e); return; }
+          stopFling();
+          s.touched = true;
+          onPointerDown(e);
+        }}
         onDoubleClick={onDoubleClick}
         onCopy={(e) => onCopy(e)}
         onCut={(e) => onCopy(e, true)}

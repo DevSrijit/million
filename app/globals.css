@@ -114,6 +114,8 @@ kbd { font: 500 11px var(--font); color: var(--muted); letter-spacing: 0.02em; }
 
 /* ---------- Grid ---------- */
 .gridwrap { position: relative; overflow: hidden; outline: none; touch-action: none; cursor: cell; }
+/* The hero lets vertical swipes scroll the page until the visitor taps the grid (Grid.tsx, take). */
+.app.embed .gridwrap:not(.taken) { touch-action: pan-y; }
 .gridwrap canvas { position: absolute; inset: 0; display: block; }
 .thumb { position: absolute; border-radius: 99px; background: color-mix(in srgb, var(--text) 22%, transparent); cursor: default; transition: background-color var(--fade) var(--ease-out); }
 .thumb:hover, .thumb:active { background: color-mix(in srgb, var(--text) 38%, transparent); }
