@@ -16,13 +16,42 @@ const TOTAL_W = COL_X[COL_X.length - 1] + COL_W[COL_W.length - 1];
 const OVERSCAN = 48;
 const FADE_MS = 1100;
 
-const FONT = '13px -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif';
-const FONT_HEAD = '500 11px -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif';
-const FONT_BOLD = '600 13px -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif';
-const C = {
-  bg: "#ffffff", line: "#ebebed", headBg: "#f9f9fa", headText: "#8a8a8e", headSel: "#1d1d1f",
-  text: "#1d1d1f", muted: "#8a8a8e", accent: "#0a6cff", error: "#d70015", frozenLine: "#d2d2d7",
+// Themes. The canvas reads C; the bars read the same values as CSS variables.
+export type GridTheme = {
+  name: string;
+  bg: string; line: string; headBg: string; headText: string; headSel: string;
+  text: string; muted: string; accent: string; accentRgb: string; onAccent: string;
+  error: string; frozenLine: string; skeleton: string; font: string; mono: string;
 };
+const SF = '-apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif';
+export const THEMES: Record<"numbers" | "ink" | "paper", GridTheme> = {
+  numbers: {
+    name: "numbers", bg: "#ffffff", line: "#ebebed", headBg: "#f9f9fa", headText: "#8a8a8e", headSel: "#1d1d1f",
+    text: "#1d1d1f", muted: "#8a8a8e", accent: "#0a6cff", accentRgb: "10,108,255", onAccent: "#ffffff",
+    error: "#d70015", frozenLine: "#d2d2d7", skeleton: "#f2f2f4", font: SF, mono: 'ui-monospace, "SF Mono", Menlo, monospace',
+  },
+  ink: {
+    name: "ink", bg: "#0a0a0b", line: "#1c1c1f", headBg: "#0e0e10", headText: "#636366", headSel: "#f5f5f7",
+    text: "#ededf0", muted: "#7c7c80", accent: "#f5f5f7", accentRgb: "245,245,247", onAccent: "#0a0a0b",
+    error: "#ff453a", frozenLine: "#2c2c30", skeleton: "#161618", font: SF, mono: 'ui-monospace, "SF Mono", Menlo, monospace',
+  },
+  paper: {
+    name: "paper", bg: "#fbfaf6", line: "#ebe7dc", headBg: "#f5f2ea", headText: "#9a9285", headSel: "#1c1a17",
+    text: "#1c1a17", muted: "#8f877a", accent: "#1f6f50", accentRgb: "31,111,80", onAccent: "#fbfaf6",
+    error: "#b3261e", frozenLine: "#ddd6c7", skeleton: "#f0ece2", font: SF, mono: 'ui-monospace, "SF Mono", Menlo, monospace',
+  },
+};
+const C: GridTheme = { ...THEMES.numbers };
+let FONT = `13px ${C.font}`;
+let FONT_HEAD = `500 11px ${C.font}`;
+let FONT_BOLD = `600 13px ${C.font}`;
+function applyTheme(t: GridTheme) {
+  Object.assign(C, t);
+  FONT = `13px ${t.font}`;
+  FONT_HEAD = `500 11px ${t.font}`;
+  FONT_BOLD = `600 13px ${t.font}`;
+}
+const tint = (a: number) => `rgba(${C.accentRgb},${a})`;
 
 const colName = (c: number) => String.fromCharCode(65 + c);
 const cellName = (c: number, r: number) => colName(c) + (r + 1);
@@ -65,7 +94,7 @@ function buildAtlas(dpr: number) {
   g.textBaseline = "middle";
   g.textAlign = "center";
   for (const ch of chars) g.fillText(ch, sx[ch] + adv[ch] / 2, h / 2 + 0.5);
-  return { cv, adv, sx, h, dpr };
+  return { cv, adv, sx, h, dpr, color: C.text };
 }
 
 // Width of text in the cell font, for growing the in-cell editor.
@@ -97,7 +126,18 @@ function refsIn(text: string, rows: number): { c0: number; c1: number; r0: numbe
   return out.filter((g) => g.c0 >= 0 && g.c1 < COL_W.length && g.r0 >= 0 && g.r0 < rows);
 }
 
-export default function Grid() {
+type GridProps = {
+  theme?: GridTheme;
+  orders?: number;
+  // app: the full demo page. embed: a hero window with no Try strip and no benchmark controls.
+  variant?: "app" | "embed";
+  // Embed only: change the tax rate every few seconds until the visitor touches the grid.
+  autoplay?: boolean;
+  title?: string;
+};
+
+export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant = "app", autoplay = false, title = "Sales ledger" }: GridProps) {
+  applyTheme(theme);
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const vThumbRef = useRef<HTMLDivElement>(null);
@@ -125,6 +165,7 @@ export default function Grid() {
     point: null as { start: number; end: number } | null, // the reference that pointing inserted, so the next point replaces it
     pointCell: null as { col: number; row: number } | null,
     pendingEdit: false, // a double-click before the cell's input arrived from the worker
+    touched: false, // the visitor used the grid: autoplay stops
     inspectId: 0,
   }).current;
 
@@ -189,7 +230,8 @@ export default function Grid() {
 
     const xOf = (c: number) => RHDR_W + COL_X[c] - s.scrollX;
     const yOf = (r: number) => (r === 0 ? HEAD_H : bodyTop + (r - first) * ROW_H + offY);
-    const atlas = s.atlas!;
+    if (!s.atlas || s.atlas.color !== C.text) s.atlas = buildAtlas(s.dpr);
+    const atlas = s.atlas;
     s.frames++;
     if (!s.body || s.body.r0 > first || s.body.r1 < Math.min(s.rows, first + count)) s.missFrames++;
     (window as unknown as { __grid: object }).__grid = { frames: s.frames, missFrames: s.missFrames, drawMs: s.drawMs };
@@ -209,7 +251,7 @@ export default function Grid() {
     const drawRow = (v: ViewReply | null, r: number, y: number, bold: boolean) => {
       if (!v || r < v.r0 || r >= v.r1) {
         // Not sent by the worker yet: a quiet placeholder instead of an empty row.
-        ctx.fillStyle = "#f2f2f4";
+        ctx.fillStyle = C.skeleton;
         for (let c = 0; c < COL_W.length; c++) {
           const x = xOf(c), w = COL_W[c];
           if (x + w < RHDR_W || x > s.w || w < 30) continue;
@@ -226,7 +268,7 @@ export default function Grid() {
         if (x + w < RHDR_W || x > s.w) continue;
         const k = base + c;
         if (heatA > 0 && (v.flags[k] & 2) && v.epoch === s.editEpoch) {
-          ctx.fillStyle = `rgba(10,108,255,${(0.2 * heatA).toFixed(3)})`;
+          ctx.fillStyle = tint(+(0.2 * heatA).toFixed(3));
           ctx.fillRect(x, y, w, ROW_H);
         }
         const text = v.texts[k];
@@ -293,7 +335,7 @@ export default function Grid() {
     if (s.cellEdit && s.editText.startsWith("=")) {
       // While a formula is typed, outline every cell and range it names, like Sheets.
       ctx.strokeStyle = C.accent;
-      ctx.fillStyle = "rgba(10,108,255,0.07)";
+      ctx.fillStyle = tint(0.07);
       for (const g of refsIn(s.editText, s.rows)) {
         const top = Math.max(g.r0, first), bot = Math.min(g.r1, first + count);
         const frozen = g.r0 === 0;
@@ -309,7 +351,7 @@ export default function Grid() {
       ctx.setLineDash([]);
     } else if (s.arrows && ins && ins.col === s.sel.col && ins.row === s.sel.row) {
       ctx.strokeStyle = C.accent;
-      ctx.fillStyle = "rgba(10,108,255,0.06)";
+      ctx.fillStyle = tint(0.06);
       ctx.lineWidth = 1;
       for (const g of ins.pre.ranges) {
         const top = Math.max(g.r0, g.r0 === 0 ? 0 : first), bot = Math.min(g.r1, first + count);
@@ -318,7 +360,7 @@ export default function Grid() {
         const y0 = g.r0 === 0 ? HEAD_H : yOf(Math.max(g.r0, first));
         const y1 = g.r1 >= first + count ? s.h : yOf(Math.min(g.r1, first + count)) + ROW_H;
         if (g.r1 < first && g.r0 !== 0) continue;
-        ctx.fillStyle = "rgba(10,108,255,0.06)";
+        ctx.fillStyle = tint(0.06);
         ctx.strokeStyle = C.accent;
         ctx.lineWidth = 1;
         ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
@@ -336,7 +378,7 @@ export default function Grid() {
         ctx.beginPath();
         ctx.roundRect(x0 + 4, ly, lw, 18, 9);
         ctx.fill();
-        ctx.fillStyle = "#fff";
+        ctx.fillStyle = C.onAccent;
         ctx.textAlign = "left";
         ctx.fillText(label, x0 + 10, ly + 9.5);
         // Arrow from the range edge to the selected cell.
@@ -556,7 +598,7 @@ export default function Grid() {
     // If the worker script is blocked or fails to load (for example a stale cached copy without
     // the COEP header), say so instead of showing "Building…" for ever.
     w.onerror = () => setStartError(true);
-    w.postMessage({ type: "init", orders: ORDERS });
+    w.postMessage({ type: "init", orders });
     return () => w.terminate();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -573,7 +615,7 @@ export default function Grid() {
       cv.height = Math.round(s.h * dpr);
       cv.style.width = `${s.w}px`;
       cv.style.height = `${s.h}px`;
-      if (!s.atlas || s.atlas.dpr !== dpr) s.atlas = buildAtlas(dpr);
+      if (!s.atlas || s.atlas.dpr !== dpr || s.atlas.color !== C.text) s.atlas = buildAtlas(dpr);
       scrollTo(s.scrollX, s.scrollY);
     });
     ro.observe(wrap);
@@ -586,6 +628,9 @@ export default function Grid() {
   useEffect(() => {
     const wrap = wrapRef.current!;
     const onWheel = (e: WheelEvent) => {
+      // In an embed, the page scrolls until the visitor clicks into the grid. Otherwise a hero
+      // would trap the wheel on the way down the landing page.
+      if (variant === "embed" && !s.touched) return;
       e.preventDefault();
       const k = e.deltaMode === 1 ? ROW_H : e.deltaMode === 2 ? viewH() : 1;
       scrollTo(s.scrollX + (e.shiftKey ? e.deltaY : e.deltaX) * k, s.scrollY + (e.shiftKey ? 0 : e.deltaY) * k);
@@ -849,16 +894,37 @@ export default function Grid() {
     },
   ];
 
+  // Embed autoplay: the hero changes the tax rate every few seconds, so a visitor sees 3M cells
+  // recompute before they touch anything. It stops for good at the first click or key press.
+  useEffect(() => {
+    if (!autoplay || !ready) return;
+    const rates = ["12%", "5%", "8%"];
+    let i = 0;
+    const id = setInterval(() => {
+      if (s.touched || document.hidden) return;
+      workerRef.current?.postMessage({ type: "edit", col: 10, row: 1, text: rates[i++ % rates.length] });
+    }, 3200);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoplay, ready]);
+
   const runBench = () => { setBenchBusy(true); setBench(null); workerRef.current?.postMessage({ type: "bench" }); };
 
   const selInfo = inspect && inspect.col === sel.col && inspect.row === sel.row ? inspect : null;
 
   return (
-    <div className="app">
+    <div
+      className={`app ${variant} theme-${theme.name}`}
+      style={{
+        "--bg": C.bg, "--chrome": C.headBg, "--line": C.line, "--text": C.text, "--muted": C.muted,
+        "--accent": C.accent, "--accent-rgb": C.accentRgb, "--on-accent": C.onAccent, "--error": C.error,
+        "--font": C.font, "--mono": C.mono,
+      } as React.CSSProperties}
+    >
       <header className="bar">
         <div className="title">
-          <span className="name">Sales ledger</span>
-          <span className="meta">{ready ? `${fmtInt(ORDERS)} orders · ${fmtInt(ready.formulas)} formulas` : "Engine spike"}</span>
+          <span className="name">{title}</span>
+          <span className="meta">{ready ? `${fmtInt(orders)} orders · ${fmtInt(ready.formulas)} formulas` : "Loading"}</span>
         </div>
         <div className="formula">
           <span className="namebox">{cellName(sel.col, sel.row)}</span>
@@ -877,16 +943,25 @@ export default function Grid() {
         </div>
       </header>
 
-      <div className="try">
-        <span className="guide">{guide}</span>
-        <div className="actions">
-          {TRY.map((t) => (
-            <button key={t.label} onClick={t.run} disabled={!ready}>{t.label}</button>
-          ))}
+      {variant === "app" && (
+        <div className="try">
+          <span className="guide">{guide}</span>
+          <div className="actions">
+            {TRY.map((t) => (
+              <button key={t.label} onClick={t.run} disabled={!ready}>{t.label}</button>
+            ))}
+          </div>
         </div>
-      </div>
+      )}
 
-      <div className="gridwrap" ref={wrapRef} tabIndex={0} onKeyDown={(e) => { if (e.target === wrapRef.current) onGridKey(e); }} onPointerDown={onPointerDown} onDoubleClick={onDoubleClick}>
+      <div
+        className="gridwrap"
+        ref={wrapRef}
+        tabIndex={0}
+        onKeyDown={(e) => { s.touched = true; if (e.target === wrapRef.current) onGridKey(e); }}
+        onPointerDown={(e) => { s.touched = true; onPointerDown(e); }}
+        onDoubleClick={onDoubleClick}
+      >
         <canvas ref={canvasRef} />
         {(
           <input
@@ -919,7 +994,7 @@ export default function Grid() {
                 The engine could not start. <button className="reload" onClick={() => location.reload()}>Reload the page</button>
               </span>
             ) : (
-              <>Building {fmtInt(ORDERS)} orders and 4,000,000 formulas…</>
+              <>Building {fmtInt(orders)} orders and {fmtInt(orders * 4)} formulas…</>
             )}
           </div>
         )}
@@ -951,12 +1026,14 @@ export default function Grid() {
             <>feeds <span className="num">{fmtInt(selInfo.dep.count)}</span> {selInfo.dep.count === 1 ? "formula" : "formulas"}</>
           ) : null}
         </div>
-        <div className="right">
-          <button className={toggles.heat ? "on" : ""} onClick={() => toggle("heat")}>Recalc heat</button>
-          <button className={toggles.arrows ? "on" : ""} onClick={() => toggle("arrows")}>Arrows</button>
-          <button onClick={runBench} disabled={!ready || benchBusy}>{benchBusy ? "Running…" : "Benchmark"}</button>
-          <span className="num frame">draw {drawMs.toFixed(1)} ms</span>
-        </div>
+        {variant === "app" && (
+          <div className="right">
+            <button className={toggles.heat ? "on" : ""} onClick={() => toggle("heat")}>Recalc heat</button>
+            <button className={toggles.arrows ? "on" : ""} onClick={() => toggle("arrows")}>Arrows</button>
+            <button onClick={runBench} disabled={!ready || benchBusy}>{benchBusy ? "Running…" : "Benchmark"}</button>
+            <span className="num frame">draw {drawMs.toFixed(1)} ms</span>
+          </div>
+        )}
       </footer>
 
       {bench && (
@@ -986,8 +1063,8 @@ function arrow(ctx: CanvasRenderingContext2D, x0: number, y0: number, x1: number
   if (len < 4) return;
   const ux = dx / len, uy = dy / len;
   const ex = x1 - ux * 4, ey = y1 - uy * 4;
-  ctx.strokeStyle = "#0a6cff";
-  ctx.fillStyle = "#0a6cff";
+  ctx.strokeStyle = C.accent;
+  ctx.fillStyle = C.accent;
   ctx.lineWidth = 1.25;
   ctx.beginPath();
   ctx.arc(x0, y0, 2.5, 0, Math.PI * 2);

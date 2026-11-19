@@ -14,14 +14,16 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
 button { font: inherit; }
 .num { font-variant-numeric: tabular-nums; }
 
-.app { display: grid; grid-template-rows: auto auto 1fr auto; height: 100dvh; }
+.app { display: grid; grid-template-rows: auto auto 1fr auto; height: 100dvh; background: var(--bg); color: var(--text); font-family: var(--font); }
+.app.embed { grid-template-rows: auto 1fr auto; height: 100%; }
+.app.embed .bar .title { display: none; }
 
 .bar { display: flex; align-items: center; gap: 20px; padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--bg); }
 .title { display: flex; flex-direction: column; min-width: 180px; }
 .title .name { font-weight: 600; letter-spacing: -0.01em; }
 .title .meta { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 .formula { flex: 1; display: flex; align-items: center; height: 32px; border: 1px solid var(--line); border-radius: 8px; background: var(--chrome); overflow: hidden; }
-.formula:focus-within { border-color: var(--accent); background: var(--bg); box-shadow: 0 0 0 3px rgb(10 108 255 / 0.12); }
+.formula:focus-within { border-color: var(--accent); background: var(--bg); box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.12); }
 .namebox { width: 76px; padding: 0 10px; font: 500 12px var(--mono); color: var(--text); border-right: 1px solid var(--line); height: 100%; display: flex; align-items: center; }
 .fx { padding: 0 8px 0 10px; color: var(--muted); font-style: italic; }
 .formula input { flex: 1; height: 100%; border: 0; outline: 0; background: transparent; font: 13px var(--mono); color: var(--text); padding-right: 10px; }
@@ -29,8 +31,8 @@ button { font: inherit; }
 
 .gridwrap { position: relative; overflow: hidden; outline: none; touch-action: none; cursor: cell; }
 .gridwrap canvas { position: absolute; inset: 0; display: block; }
-.thumb { position: absolute; border-radius: 99px; background: rgb(0 0 0 / 0.22); cursor: default; transition: background 120ms ease; }
-.thumb:hover, .thumb:active { background: rgb(0 0 0 / 0.38); }
+.thumb { position: absolute; border-radius: 99px; background: color-mix(in srgb, var(--text) 22%, transparent); cursor: default; transition: background 120ms ease; }
+.thumb:hover, .thumb:active { background: color-mix(in srgb, var(--text) 38%, transparent); }
 .thumb.v { right: 3px; top: 0; width: 7px; }
 .thumb.h { left: 0; bottom: 3px; height: 7px; }
 .loading { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); font-variant-numeric: tabular-nums; background: var(--bg); }
@@ -40,7 +42,7 @@ button { font: inherit; }
 .status .err { color: var(--error); }
 .status .right { display: flex; align-items: center; gap: 6px; }
 .status button { height: 26px; padding: 0 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--muted); cursor: pointer; }
-.status button.on { color: var(--accent); border-color: rgb(10 108 255 / 0.35); background: rgb(10 108 255 / 0.06); }
+.status button.on { color: var(--accent); border-color: rgba(var(--accent-rgb), 0.35); background: rgba(var(--accent-rgb), 0.06); }
 .status button:disabled { opacity: 0.5; cursor: default; }
 .status .frame { width: 92px; text-align: right; }
 
@@ -59,7 +61,7 @@ button { font: inherit; }
 .try .guide { color: var(--text); min-width: 0; }
 .try .actions { display: flex; gap: 6px; flex-shrink: 0; }
 .try button { height: 28px; padding: 0 12px; border: 1px solid var(--line); border-radius: 999px; background: var(--bg); color: var(--text); cursor: pointer; white-space: nowrap; transition: background 120ms ease, border-color 120ms ease, transform 120ms ease; }
-.try button:hover { background: var(--chrome); border-color: #d2d2d7; }
+.try button:hover { background: var(--chrome); border-color: color-mix(in srgb, var(--text) 20%, transparent); }
 .try button:active { transform: scale(0.97); }
 .try button:disabled { opacity: 0.4; cursor: default; }
 @media (max-width: 1100px) { .try { flex-direction: column; align-items: flex-start; } .try .actions { flex-wrap: wrap; } }
