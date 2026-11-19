@@ -76,7 +76,7 @@ type Inspect = {
   dep: { count: number; cells: { col: number; row: number }[] };
 };
 type Ready = { rows: number; buildMs: number; recalcMs: number; cells: number; formulas: number; typedArrayMB: number; epoch: number };
-type Edited = { col: number; row: number; recomputed: number; ms: number; computeMs: number; slices: number; epoch: number; cycles: number; kind: "edit" | "undo" | "redo" };
+type Edited = { col: number; row: number; recomputed: number; ms: number; computeMs: number; slices: number; epoch: number; cycles: number; kind: "edit" | "undo" | "redo" | "paste" | "clear"; count?: number };
 type Bench = { results: { label: string; median: number; best: number; recomputed: number }[]; full: { ms: number; recomputed: number } };
 
 // Tabular digits: SF Pro digits are proportional, and canvas has no font-variant-numeric.
@@ -178,6 +178,32 @@ function parseCellRef(t: string): { col: number; row: number } | null {
   return row >= 0 ? { col, row } : null;
 }
 
+// Clipboard text, as Excel and Sheets write it: tabs between cells, newlines between rows, and
+// quotes around a cell that holds a tab, a newline or a quote.
+function toTSV(rows: string[][]): string {
+  return rows.map((r) => r.map((v) => (/[\t\n\r"]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v)).join("\t")).join("\n");
+}
+function fromTSV(text: string): string[][] {
+  const rows: string[][] = [];
+  let row: string[] = [], cell = "", i = 0, quoted = false;
+  const t = text.replace(/\r\n?/g, "\n");
+  while (i < t.length) {
+    const ch = t[i];
+    if (quoted) {
+      if (ch === '"' && t[i + 1] === '"') { cell += '"'; i += 2; continue; }
+      if (ch === '"') { quoted = false; i++; continue; }
+      cell += ch; i++; continue;
+    }
+    if (ch === '"' && cell === "") { quoted = true; i++; continue; }
+    if (ch === "\t") { row.push(cell); cell = ""; i++; continue; }
+    if (ch === "\n") { row.push(cell); rows.push(row); row = []; cell = ""; i++; continue; }
+    cell += ch; i++;
+  }
+  if (cell !== "" || row.length) { row.push(cell); rows.push(row); }
+  return rows;
+}
+const MAX_COPY = 200_000; // cells; a bigger block would freeze the page while it is formatted
+
 export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant = "app", autoplay = false, title = "Sales ledger", home }: GridProps) {
   applyTheme(theme);
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -209,6 +235,10 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
     pendingEdit: false, // a double-click before the cell's input arrived from the worker
     touched: false, // the visitor used the grid: autoplay stops
     gridFocused: false, // the selection draws in the accent only while the grid has focus
+    corner: { col: 0, row: 1 }, // the moving end of the range; the active cell (sel) stays put, like Excel
+    copied: null as { c0: number; r0: number; c1: number; r1: number } | null, // dashed outline after a copy
+    clipText: "", // what we last put on the clipboard: a paste of exactly this is our own copy
+    statsTimer: 0 as unknown as ReturnType<typeof setTimeout>,
     pageScrollAt: 0, wheelLast: 0, gridGesture: false, // embed wheel routing, per gesture
     axis: newAxisState(), // the soft axis lock for wheel scrolling
     // Shared memory: engine columns read directly, no view messages.
@@ -232,6 +262,7 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
   const [nameText, setNameText] = useState<string | null>(null); // non-null while the name box is being typed in
   const [announce, setAnnounce] = useState("");
   const [gridFocused, setGridFocused] = useState(false);
+  const [rangeStats, setRangeStats] = useState<string | null>(null); // "Sum … · Average … · Count …" for a range
   const nameRef = useRef<HTMLInputElement>(null);
   const benchCloseRef = useRef<HTMLButtonElement>(null);
   const keysCloseRef = useRef<HTMLButtonElement>(null);
@@ -447,7 +478,8 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
         ctx.strokeRect(x0 + 1, y0 + 1, x1 - x0 - 2, y1 - y0 - 2);
       }
       ctx.setLineDash([]);
-    } else if (s.arrows && ins && ins.col === s.sel.col && ins.row === s.sel.row) {
+    } else if (s.arrows && ins && ins.col === s.sel.col && ins.row === s.sel.row && s.corner.col === s.sel.col && s.corner.row === s.sel.row) {
+      // Trace arrows only for a single cell: over a block they are clutter, as in Excel.
       ctx.strokeStyle = C.accent;
       ctx.fillStyle = tint(0.06);
       ctx.lineWidth = 1;
@@ -503,6 +535,37 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
         ctx.fill();
       }
     }
+    // The selected range: a light fill and a hairline, the active cell keeps its thick border.
+    const blockRect = (g: { c0: number; r0: number; c1: number; r1: number }) => {
+      if (g.r1 > 0 && g.r1 < first && g.r0 > 0) return null;
+      if (g.r0 > 0 && g.r0 >= first + count) return null;
+      const x0 = xOf(g.c0), x1 = xOf(g.c1) + COL_W[g.c1];
+      const y0 = g.r0 === 0 ? HEAD_H : yOf(Math.max(g.r0, first));
+      const y1 = g.r1 === 0 ? HEAD_H + ROW_H : g.r1 >= first + count ? s.h + 4 : yOf(g.r1) + ROW_H;
+      return { x0, y0, x1, y1 };
+    };
+    const g = rangeOf();
+    if (g.c0 !== g.c1 || g.r0 !== g.r1) {
+      const b = blockRect(g);
+      if (b) {
+        ctx.fillStyle = tint(s.gridFocused ? 0.08 : 0.05);
+        ctx.fillRect(b.x0, b.y0, b.x1 - b.x0, b.y1 - b.y0);
+        ctx.strokeStyle = s.gridFocused ? C.accent : C.muted;
+        ctx.lineWidth = 1;
+        ctx.strokeRect(b.x0 + 0.5, b.y0 + 0.5, b.x1 - b.x0 - 1, b.y1 - b.y0 - 1);
+      }
+    }
+    if (s.copied) {
+      // The copied block keeps a dashed outline until the next edit or Esc, like Excel.
+      const b = blockRect(s.copied);
+      if (b) {
+        ctx.setLineDash([4, 3]);
+        ctx.strokeStyle = C.accent;
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(b.x0 + 1, b.y0 + 1, b.x1 - b.x0 - 2, b.y1 - b.y0 - 2);
+        ctx.setLineDash([]);
+      }
+    }
     if (visible(s.sel.row)) {
       ctx.strokeStyle = s.gridFocused || s.cellEdit ? C.accent : C.muted;
       ctx.lineWidth = 2;
@@ -522,7 +585,9 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
     for (let c = 0; c < COL_W.length; c++) {
       const x = xOf(c);
       if (x + COL_W[c] < RHDR_W || x > s.w) continue;
-      ctx.fillStyle = c === s.sel.col ? C.headSel : C.headText;
+      const inCols = c >= g.c0 && c <= g.c1;
+      if (inCols) { ctx.fillStyle = tint(0.08); ctx.fillRect(x, 0, COL_W[c], HEAD_H); }
+      ctx.fillStyle = inCols ? C.headSel : C.headText;
       ctx.fillText(colName(c), x + COL_W[c] / 2, HEAD_H / 2 + 0.5);
       ctx.fillStyle = C.line;
       ctx.fillRect(Math.round(x) - 0.5, 6, 1, HEAD_H - 12);
@@ -533,7 +598,9 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
     ctx.fillRect(0, HEAD_H, RHDR_W, s.h);
     ctx.textAlign = "right";
     const rowLabel = (r: number, y: number) => {
-      ctx.fillStyle = r === s.sel.row ? C.headSel : C.headText;
+      const inRows = r >= g.r0 && r <= g.r1;
+      if (inRows) { ctx.fillStyle = tint(0.08); ctx.fillRect(0, y, RHDR_W - 1, ROW_H); }
+      ctx.fillStyle = inRows ? C.headSel : C.headText;
       ctx.fillText(fmtInt(r + 1), RHDR_W - 10, y + ROW_H / 2 + 0.5);
     };
     ctx.save();
@@ -598,6 +665,8 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
     col = Math.min(Math.max(0, col), COL_W.length - 1);
     row = Math.min(Math.max(0, row), s.rows - 1);
     s.sel = { col, row };
+    s.corner = { col, row };
+    scheduleStats();
     s.pendingEdit = false;
     setSel(s.sel);
     setError(null);
@@ -619,6 +688,70 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
     redraw();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [redraw, scrollTo]);
+
+  // The selected block: from the active cell to the moving corner.
+  const rangeOf = () => ({
+    c0: Math.min(s.sel.col, s.corner.col), c1: Math.max(s.sel.col, s.corner.col),
+    r0: Math.min(s.sel.row, s.corner.row), r1: Math.max(s.sel.row, s.corner.row),
+  });
+
+  // Shift-arrows, Shift-click and drags move the corner; the active cell and the formula bar stay.
+  const extendTo = (col: number, row: number) => {
+    col = Math.min(Math.max(0, col), COL_W.length - 1);
+    row = Math.min(Math.max(0, row), s.rows - 1);
+    s.corner = { col, row };
+    if (s.w > 0 && s.h > 0 && row > 0) {
+      const top = (row - 1) * ROW_H, vh = viewH();
+      if (top < s.scrollY) scrollTo(s.scrollX, top);
+      else if (top + ROW_H > s.scrollY + vh) scrollTo(s.scrollX, top + ROW_H - vh);
+    }
+    if (s.w > 0) {
+      const left = COL_X[col], vw = s.w - RHDR_W;
+      if (left < s.scrollX) scrollTo(left, s.scrollY);
+      else if (left + COL_W[col] > s.scrollX + vw) scrollTo(left + COL_W[col] - vw, s.scrollY);
+    }
+    scheduleStats();
+    redraw();
+  };
+
+  // What a cell shows, read straight from engine memory (shared mode).
+  const textAt = (c: number, r: number): string => {
+    const col = s.cols[c];
+    if (!col) return "";
+    const tag = col.t[r], val = col.v[r];
+    if (tag === 0) return "";
+    if (tag === 1) return formatNumber(val, s.cellFormats.get(c * s.rows + r) ?? s.formats[c] ?? "general");
+    if (tag === 2) return s.strs[val] ?? "";
+    if (tag === 3) return val ? "TRUE" : "FALSE";
+    return ERRS[val] ?? "";
+  };
+
+  // Sum, Average and Count for a range, like the Sheets status bar. Read from shared memory on the
+  // main thread, debounced so a held Shift-arrow does not add up a million cells on every key.
+  function scheduleStats() {
+    clearTimeout(s.statsTimer);
+    s.statsTimer = setTimeout(() => {
+      const g = rangeOf();
+      if ((g.c0 === g.c1 && g.r0 === g.r1) || !s.shared) { setRangeStats(null); return; }
+      let sum = 0, nums = 0, filled = 0;
+      for (let c = g.c0; c <= g.c1; c++) {
+        const col = s.cols[c];
+        if (!col) continue;
+        const t = col.t, v = col.v;
+        for (let r = g.r0; r <= g.r1; r++) {
+          const tag = t[r];
+          if (tag === 0) continue;
+          filled++;
+          if (tag === 1) { sum += v[r]; nums++; }
+        }
+      }
+      const cells = (g.c1 - g.c0 + 1) * (g.r1 - g.r0 + 1);
+      const f = (x: number) => formatNumber(x, Number.isInteger(x) ? "int" : "money");
+      setRangeStats(
+        `${fmtInt(cells)} cells · ` + (nums ? `Sum ${f(sum)} · Average ${f(sum / nums)} · ` : "") + `Count ${fmtInt(filled)}`,
+      );
+    }, 90);
+  }
 
   // Worker lifecycle.
   useEffect(() => {
@@ -684,14 +817,16 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
           s.editEpoch = m.epoch;
           s.editAt = performance.now();
           setLastEdit({ ...m, name: cellName(m.col, m.row) });
+          if (m.kind === "paste" || m.kind === "clear") s.copied = null;
           // An undo or redo shows the cell it changed, like Numbers and Excel.
-          if (m.kind !== "edit") select(m.col, m.row);
+          if (m.kind === "undo" || m.kind === "redo") select(m.col, m.row);
           s.body = s.body && { ...s.body, epoch: -1 };
           s.head = s.head && { ...s.head, epoch: -1 };
           requestView();
           w.postMessage({ type: "inspect", id: ++s.inspectId, col: s.sel.col, row: s.sel.row });
           break;
         case "editError":
+          if (m.quiet) { setError(m.message); break; }
           // Reopen the cell editor with the user's text, so they can fix it.
           select(m.col, m.row);
           startEdit(m.text, "edit");
@@ -898,8 +1033,17 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
       workerRef.current?.postMessage({ type: "edit", col: s.sel.col, row: s.sel.row, text: s.editText });
       s.editing = false;
     }
+    if (e.shiftKey) { extendTo(cell.col, cell.row); wrapRef.current!.focus(); return; }
     select(cell.col, cell.row);
     wrapRef.current!.focus();
+    // A drag from here selects a range.
+    const move = (ev: PointerEvent) => {
+      const c2 = cellAt(ev.clientX, ev.clientY);
+      if (c2 && (c2.col !== s.corner.col || c2.row !== s.corner.row)) extendTo(c2.col, c2.row);
+    };
+    const up = () => { window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up); };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
   };
 
   const onDoubleClick = (e: React.MouseEvent) => {
@@ -972,7 +1116,28 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
       ArrowLeft: [jump ? 0 : col - 1, row], ArrowRight: [jump ? COL_W.length - 1 : col + 1, row],
       PageUp: [col, row - page], PageDown: [col, row + page], Tab: [col + (e.shiftKey ? -1 : 1), row],
     };
+    if (e.shiftKey && go[e.key] && e.key !== "Tab") {
+      // Shift extends: the same moves, measured from the corner, not the active cell.
+      const k = s.corner;
+      const ext: Record<string, [number, number]> = {
+        ArrowUp: [k.col, jump ? 0 : k.row - 1], ArrowDown: [k.col, jump ? s.rows - 1 : k.row + 1],
+        ArrowLeft: [jump ? 0 : k.col - 1, k.row], ArrowRight: [jump ? COL_W.length - 1 : k.col + 1, k.row],
+        PageUp: [k.col, k.row - page], PageDown: [k.col, k.row + page],
+        Home: jump ? [0, 0] : [0, k.row], End: jump ? [COL_W.length - 1, s.rows - 1] : [COL_W.length - 1, k.row],
+      };
+      e.preventDefault();
+      extendTo(...ext[e.key]);
+      return;
+    }
     if (go[e.key]) { e.preventDefault(); select(...go[e.key]); return; }
+    if (jump && e.key.toLowerCase() === "a") { e.preventDefault(); select(0, 0); extendTo(COL_W.length - 1, s.rows - 1); return; }
+    if (e.key === "Escape") {
+      // Collapse the range, then drop the copied outline.
+      if (s.corner.col !== s.sel.col || s.corner.row !== s.sel.row) { s.corner = { ...s.sel }; scheduleStats(); }
+      else s.copied = null;
+      redraw();
+      return;
+    }
     if (e.key === "Enter" && e.shiftKey) { e.preventDefault(); select(col, row - 1); return; } // like Excel
     if (!IS_MAC && e.ctrlKey && e.key.toLowerCase() === "y") { e.preventDefault(); workerRef.current?.postMessage({ type: "redo" }); return; }
     if (jump && e.key.toLowerCase() === "z") {
@@ -989,7 +1154,9 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
     }
     if (e.key === "Backspace" || e.key === "Delete") {
       e.preventDefault();
-      workerRef.current?.postMessage({ type: "edit", col, row, text: "" });
+      const g = rangeOf();
+      if (g.c0 !== g.c1 || g.r0 !== g.r1) workerRef.current?.postMessage({ type: "clearRange", ...g });
+      else workerRef.current?.postMessage({ type: "edit", col, row, text: "" });
       return;
     }
     if (s.cellEdit && e.key.length === 1 && !jump) {
@@ -1083,6 +1250,49 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
   // An opened panel takes focus on its Close button, so Esc and Tab start there.
   useEffect(() => { if (keysOpen) keysCloseRef.current?.focus(); }, [keysOpen]);
   useEffect(() => { if (bench) benchCloseRef.current?.focus(); }, [bench]);
+
+  // Copy: tab-separated displayed values, so a block pastes into Excel, Sheets or Numbers. The worker
+  // also keeps the formulas, so a paste back into this sheet moves them like Excel does.
+  const onCopy = (e: React.ClipboardEvent, cut = false) => {
+    if (e.target !== wrapRef.current || !s.shared) return;
+    const g = rangeOf();
+    const cells = (g.c1 - g.c0 + 1) * (g.r1 - g.r0 + 1);
+    if (cells > MAX_COPY) { e.preventDefault(); setError(`That is ${fmtInt(cells)} cells. Copy up to ${fmtInt(MAX_COPY)} at a time.`); return; }
+    const rows: string[][] = [];
+    for (let r = g.r0; r <= g.r1; r++) { const row: string[] = []; for (let c = g.c0; c <= g.c1; c++) row.push(textAt(c, r)); rows.push(row); }
+    const tsv = toTSV(rows);
+    e.clipboardData.setData("text/plain", tsv);
+    e.preventDefault();
+    s.clipText = tsv;
+    s.copied = cut ? null : g;
+    workerRef.current?.postMessage({ type: "copySnapshot", ...g });
+    if (cut) workerRef.current?.postMessage({ type: "clearRange", ...g });
+    redraw();
+  };
+
+  // Paste: our own copy keeps its formulas (shifted); anything else arrives as values and formulas
+  // typed as text. One copied value fills the whole selected range.
+  const onPaste = (e: React.ClipboardEvent) => {
+    if (e.target !== wrapRef.current) return;
+    const text = e.clipboardData.getData("text/plain");
+    if (!text) return;
+    e.preventDefault();
+    const g = rangeOf();
+    if (text === s.clipText) {
+      workerRef.current?.postMessage({ type: "pasteInternal", target: g });
+    } else {
+      const rows = fromTSV(text);
+      const single = rows.length === 1 && rows[0].length === 1;
+      const h = single ? g.r1 - g.r0 + 1 : rows.length;
+      const w = single ? g.c1 - g.c0 + 1 : Math.max(...rows.map((r) => r.length));
+      if (h * w > 1_000_000) { setError(`That is ${fmtInt(h * w)} cells. Paste up to 1,000,000 at a time.`); return; }
+      const cells: [number, number, string][] = [];
+      for (let i = 0; i < h; i++) for (let j = 0; j < w; j++) cells.push([g.c0 + j, g.r0 + i, single ? rows[0][0] : rows[i][j] ?? ""]);
+      workerRef.current?.postMessage({ type: "editRange", cells, at: { col: g.c0, row: g.r0 }, kind: "paste" });
+      if (!single) { select(g.c0, g.r0); extendTo(g.c0 + w - 1, g.r0 + h - 1); }
+    }
+    s.copied = null;
+  };
 
   const toggle = (k: "heat" | "arrows") => {
     const next = { ...toggles, [k]: !toggles[k] };
@@ -1301,6 +1511,9 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
         onKeyDown={(e) => { s.touched = true; if (e.target === wrapRef.current) onGridKey(e); }}
         onPointerDown={(e) => { s.touched = true; onPointerDown(e); }}
         onDoubleClick={onDoubleClick}
+        onCopy={(e) => onCopy(e)}
+        onCut={(e) => onCopy(e, true)}
+        onPaste={onPaste}
       >
         <canvas ref={canvasRef} />
         {(
@@ -1360,7 +1573,14 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
             <span className="err" role="alert">{error}</span>
           ) : lastEdit ? (
             <>
-              {lastEdit.kind === "undo" ? "Undo: " : lastEdit.kind === "redo" ? "Redo: " : ""}<b>{lastEdit.name}</b> changed · <b className="num">{fmtInt(lastEdit.recomputed)}</b> {lastEdit.recomputed === 1 ? "cell" : "cells"} recomputed in{" "}
+              {lastEdit.kind === "undo" ? "Undo: " : lastEdit.kind === "redo" ? "Redo: " : ""}
+              {(lastEdit.kind === "undo" || lastEdit.kind === "redo") && (lastEdit.count ?? 1) > 1 ? (
+                <><b className="num">{fmtInt(lastEdit.count ?? 0)}</b> cells changed</>
+              ) : lastEdit.kind === "paste" || lastEdit.kind === "clear" ? (
+                <>{lastEdit.kind === "paste" ? "Pasted" : "Cleared"} <b className="num">{fmtInt(lastEdit.count ?? 0)}</b> {lastEdit.count === 1 ? "cell" : "cells"}</>
+              ) : (
+                <><b>{lastEdit.name}</b> changed</>
+              )}{" "}· <b className="num">{fmtInt(lastEdit.recomputed)}</b> {lastEdit.recomputed === 1 ? "cell" : "cells"} recomputed in{" "}
               <b className="num">{fmtDur(lastEdit.ms)}</b>
               {lastEdit.slices > 1 && <> · {lastEdit.slices} slices, the grid stayed live</>}
             </>
@@ -1377,7 +1597,9 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
           ) : null}
         </div>
         <div className="sel">
-          {selInfo && selInfo.input.startsWith("=") ? (
+          {rangeStats ? (
+            <span className="num">{rangeStats}</span>
+          ) : selInfo && selInfo.input.startsWith("=") ? (
             <>reads <span className="num">{fmtInt(selInfo.reads)}</span> · feeds <span className="num">{fmtInt(selInfo.dep.count)}</span></>
           ) : selInfo ? (
             <>feeds <span className="num">{fmtInt(selInfo.dep.count)}</span> {selInfo.dep.count === 1 ? "formula" : "formulas"}</>

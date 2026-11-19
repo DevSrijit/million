@@ -4,6 +4,7 @@
 // messages, so the grid keeps scrolling while 3M cells recompute, and the values update in place.
 import { buildLedger, DEMO_COLS } from "./demo";
 import { ParseError, RecalcStats, Sheet } from "./sheet";
+import { shiftFormula } from "./parser";
 import { CsvTooLarge, parseCsvFile, NUM, STR } from "./csv";
 
 export type ViewReply = {
@@ -38,12 +39,19 @@ function syncStrings() {
 const post = (msg: unknown, transfer: Transferable[] = []) => (self as unknown as Worker).postMessage(msg, transfer);
 
 // Undo history: inputs before and after each edit.
-type Change = { col: number; row: number; before: string; after: string };
+// One undo step: every cell it changed. A single edit has one cell; a paste or a cleared range many.
+type Change = { col: number; row: number; cells: { col: number; row: number; before: string; after: string }[] };
 const undo: Change[] = [];
 const redo: Change[] = [];
 
 // The cell of the edit that is running, for the reply.
-let running: { col: number; row: number; slices: number; kind: "edit" | "undo" | "redo" } | null = null;
+let running: { col: number; row: number; slices: number; kind: "edit" | "undo" | "redo" | "paste" | "clear"; count: number } | null = null;
+
+// Batch edits are capped: the undo step keeps every old input in memory.
+const MAX_BATCH = 1_000_000;
+
+// The block copied last, kept with its formulas so a paste can shift them like Excel.
+let clip: { c0: number; r0: number; inputs: string[][] } | null = null;
 
 // A zero-delay yield. setTimeout(0) is clamped to 4 ms after a few nested calls; a MessageChannel is not.
 const channel = new MessageChannel();
@@ -54,7 +62,7 @@ function reply(st: RecalcStats) {
   const r = running!;
   running = null;
   syncStrings();
-  post({ type: "edited", col: r.col, row: r.row, slices: r.slices, kind: r.kind, ...st });
+  post({ type: "edited", col: r.col, row: r.row, slices: r.slices, kind: r.kind, count: r.count, ...st });
 }
 
 function pump() {
@@ -75,17 +83,30 @@ function settle() {
 }
 
 function begin(col: number, row: number, text: string, history: "push" | "undo" | "redo"): boolean {
+  return beginBatch([[col, row, text]], { col, row }, history === "push" ? "edit" : history, false);
+}
+
+// Applies one undoable edit of any size. `kind` labels it for the status bar.
+function beginBatch(cells: [number, number, string][], at: { col: number; row: number }, kind: "edit" | "undo" | "redo" | "paste" | "clear", lenient: boolean): boolean {
   settle();
-  const before = sheet.getInput(col, row);
-  try {
-    sheet.beginInput(col, row, text);
-  } catch (err) {
-    post({ type: "editError", col, row, text, message: err instanceof ParseError ? err.message : String(err) });
+  cells = cells.filter(([c, r]) => c >= 0 && r >= 0 && c < sheet.cols && r < sheet.rows);
+  if (cells.length > MAX_BATCH) {
+    post({ type: "editError", col: at.col, row: at.row, text: "", message: `That is ${cells.length.toLocaleString("en-US")} cells. Edit up to ${MAX_BATCH.toLocaleString("en-US")} at a time.`, quiet: true });
     return false;
   }
-  const change = { col, row, before, after: text };
-  if (history === "push") { undo.push(change); redo.length = 0; }
-  running = { col, row, slices: 0, kind: history === "push" ? "edit" : history };
+  const before = cells.map(([c, r]) => sheet.getInput(c, r));
+  try {
+    sheet.beginInputs(cells, lenient);
+  } catch (err) {
+    const [c, r, text] = cells[0];
+    post({ type: "editError", col: c, row: r, text, message: err instanceof ParseError ? err.message : String(err) });
+    return false;
+  }
+  if (kind !== "undo" && kind !== "redo") {
+    undo.push({ col: at.col, row: at.row, cells: cells.map(([c, r, after], i) => ({ col: c, row: r, before: before[i], after })) });
+    redo.length = 0;
+  }
+  running = { col: at.col, row: at.row, slices: 0, kind, count: cells.length };
   pump();
   return true;
 }
@@ -198,7 +219,49 @@ function handle(m: { type: string; [k: string]: any }) {
       const from = m.type === "undo" ? undo : redo;
       const ch = from.pop();
       if (!ch) { post({ type: "historyEmpty", which: m.type }); break; }
-      if (begin(ch.col, ch.row, m.type === "undo" ? ch.before : ch.after, m.type)) (m.type === "undo" ? redo : undo).push(ch);
+      const cells = ch.cells.map((x) => [x.col, x.row, m.type === "undo" ? x.before : x.after] as [number, number, string]);
+      if (beginBatch(cells, { col: ch.col, row: ch.row }, m.type, true)) (m.type === "undo" ? redo : undo).push(ch);
+      break;
+    }
+    case "editRange": {
+      // A paste from outside, already split into cells by the page.
+      beginBatch(m.cells, m.at, m.kind ?? "paste", true);
+      break;
+    }
+    case "clearRange": {
+      const { c0, r0, c1, r1 } = m;
+      const n = (c1 - c0 + 1) * (r1 - r0 + 1);
+      if (n > MAX_BATCH) {
+        post({ type: "editError", col: c0, row: r0, text: "", message: `That is ${n.toLocaleString("en-US")} cells. Clear up to ${MAX_BATCH.toLocaleString("en-US")} at a time.`, quiet: true });
+        break;
+      }
+      const cells: [number, number, string][] = [];
+      for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) if (sheet.getInput(c, r) !== "") cells.push([c, r, ""]);
+      if (cells.length) beginBatch(cells, { col: c0, row: r0 }, "clear", true);
+      break;
+    }
+    case "copySnapshot": {
+      // Keep the copied block's inputs as they are now, so a later paste uses what was copied.
+      const { c0, r0, c1, r1 } = m;
+      clip = { c0, r0, inputs: sheet.inputsIn(c0, r0, c1, r1) };
+      break;
+    }
+    case "pasteInternal": {
+      // A paste of our own copy: formulas move like Excel's (relative references shift, $ stays).
+      // A single copied cell fills the whole target range.
+      if (!clip) break;
+      const src = clip;
+      const h = src.inputs.length, w = src.inputs[0].length;
+      const t = m.target as { c0: number; r0: number; c1: number; r1: number };
+      const fill = h === 1 && w === 1;
+      const rows = fill ? t.r1 - t.r0 + 1 : h, cols = fill ? t.c1 - t.c0 + 1 : w;
+      const cells: [number, number, string][] = [];
+      for (let i = 0; i < rows; i++) for (let j = 0; j < cols; j++) {
+        const si = fill ? 0 : i, sj = fill ? 0 : j;
+        const tc = t.c0 + j, tr = t.r0 + i;
+        cells.push([tc, tr, shiftFormula(src.inputs[si][sj], src.c0 + sj, src.r0 + si, tc, tr)]);
+      }
+      beginBatch(cells, { col: t.c0, row: t.r0 }, "paste", true);
       break;
     }
     case "inspect": {
