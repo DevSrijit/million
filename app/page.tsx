@@ -147,7 +147,7 @@ export default function Landing() {
 
       <section className={css.closing}>
         <h2>Try to slow it down.</h2>
-        <p>Edit the first order, change the tax rate, write your own SUMIF over a million rows.</p>
+        <p>Edit the first order, change the tax rate, write your own SUMIF over a million rows. Or drop in your own CSV: it is read on your machine and never uploaded.</p>
         <a href="/sheet" className={css.primary}>Open the demo</a>
       </section>
 

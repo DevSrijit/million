@@ -15,9 +15,19 @@ const ORDERS = 1_000_000;
 const ROW_H = 26;
 const HEAD_H = 26;
 const RHDR_W = 76;
-const COL_W = [80, 76, 62, 92, 116, 100, 116, 136, 24, 112, 140, 40];
-const COL_X = COL_W.reduce<number[]>((xs, w, i) => (xs.push(i ? xs[i - 1] + COL_W[i - 1] : 0), xs), []);
-const TOTAL_W = COL_X[COL_X.length - 1] + COL_W[COL_W.length - 1];
+// Column layout. The ledger has fixed widths; an imported file brings its own (auto-fit).
+const LEDGER_W = [80, 76, 62, 92, 116, 100, 116, 136, 24, 112, 140, 40];
+let COL_W: number[] = [];
+let COL_X: number[] = [];
+let TOTAL_W = 0;
+function setColumns(widths: number[]) {
+  COL_W = widths;
+  COL_X = [];
+  let x = 0;
+  for (const w of widths) { COL_X.push(x); x += w; }
+  TOTAL_W = x;
+}
+setColumns(LEDGER_W);
 const OVERSCAN = 48;
 const FADE_MS = 1100;
 
@@ -53,7 +63,8 @@ function applyTheme(t: GridTheme) {
 }
 const tint = (a: number) => `rgba(${C.accentRgb},${a})`;
 
-const colName = (c: number) => String.fromCharCode(65 + c);
+// A, B, … Z, AA, AB, …
+const colName = (c: number) => { let s = ""; for (let n = c + 1; n > 0; n = Math.floor((n - 1) / 26)) s = String.fromCharCode(65 + ((n - 1) % 26)) + s; return s; };
 const cellName = (c: number, r: number) => colName(c) + (r + 1);
 const fmtInt = (n: number) => Math.round(n).toLocaleString("en-US");
 // A duration with its unit. Sub-millisecond edits show in microseconds.
@@ -176,6 +187,7 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
     strs: [] as string[],
     formats: [] as NumFormat[],
     cellFormats: new Map<number, NumFormat>(),
+    prevRows: 0, prevCols: [] as (SharedCol | undefined)[], prevStrs: [] as string[], // restored if an import fails
     inspectId: 0,
   }).current;
 
@@ -183,6 +195,10 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
   const [lastEdit, setLastEdit] = useState<(Edited & { name: string }) | null>(null);
   const [recalcing, setRecalcing] = useState<string | null>(null);
   const [startError, setStartError] = useState(false);
+  const [doc, setDoc] = useState<{ kind: "ledger" } | { kind: "csv"; name: string; dataRows: number; dataCols: number; bytes: number; parseMs: number }>({ kind: "ledger" });
+  const [loading, setLoading] = useState<{ name: string; pct: number; rows: number } | null>(null);
+  const [dragOver, setDragOver] = useState(false);
+  const fileRef = useRef<HTMLInputElement>(null);
   const [formula, setFormulaState] = useState("");
   const [cellEdit, setCellEdit] = useState<{ col: number; row: number } | null>(null);
   // The formula bar and the in-cell editor share one text.
@@ -584,6 +600,16 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
           break;
         case "ready":
           s.shared = !!m.shared;
+          setColumns(m.widths ?? LEDGER_W);
+          setDoc(m.kind === "csv" ? { kind: "csv", name: m.name, dataRows: m.dataRows, dataCols: m.dataCols, bytes: m.bytes, parseMs: m.parseMs } : { kind: "ledger" });
+          setLoading(null);
+          s.scrollX = 0;
+          s.scrollY = 0;
+          s.sel = { col: 0, row: 1 };
+          s.inspect = null;
+          s.body = null;
+          s.head = null;
+          setLastEdit(null);
           s.rows = m.rows;
           s.wantEpoch = m.epoch;
           setReady(m);
@@ -639,6 +665,17 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
             if (s.pendingEdit) { s.pendingEdit = false; startEdit(m.input, "edit"); }
             redraw();
           }
+          break;
+        case "csvProgress":
+          setLoading({ name: m.name, pct: m.total ? m.bytes / m.total : 0, rows: m.rows });
+          break;
+        case "csvError":
+          setLoading(null);
+          s.rows = s.prevRows; // the old sheet is still in the worker
+          s.cols = s.prevCols;
+          s.strs = s.prevStrs;
+          setError(`${m.name}: ${m.message}`);
+          redraw();
           break;
         case "workerError":
           console.error("worker:", m.message, m.request, m.stack);
@@ -987,12 +1024,30 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoplay, ready]);
 
+  // Open a CSV: the file is read in the worker, on this machine. Nothing is uploaded.
+  const openFile = (file: File | undefined | null) => {
+    if (!file || !workerRef.current) return;
+    if (s.cellEdit) endEdit(false);
+    setError(null);
+    setLoading({ name: file.name, pct: 0, rows: 0 });
+    // The new sheet's columns arrive before "ready": keep the old ones aside in case the import fails.
+    s.prevRows = s.rows; s.prevCols = s.cols; s.prevStrs = s.strs;
+    s.cols = [];
+    s.strs = [];
+    s.rows = 0;
+    s.touched = true; // no autoplay over the user's data
+    workerRef.current.postMessage({ type: "loadCsv", file });
+  };
+
   const runBench = () => { setBenchBusy(true); setBench(null); workerRef.current?.postMessage({ type: "bench" }); };
 
   const selInfo = inspect && inspect.col === sel.col && inspect.row === sel.row ? inspect : null;
 
   return (
     <div
+      onDragOver={(e) => { if (variant !== "app" || !e.dataTransfer.types.includes("Files")) return; e.preventDefault(); setDragOver(true); }}
+      onDragLeave={(e) => { if (e.currentTarget === e.target || !e.currentTarget.contains(e.relatedTarget as Node)) setDragOver(false); }}
+      onDrop={(e) => { if (variant !== "app") return; e.preventDefault(); setDragOver(false); openFile(e.dataTransfer.files?.[0]); }}
       className={`app ${variant} theme-${theme.name}`}
       style={{
         "--bg": C.bg, "--chrome": C.headBg, "--line": C.line, "--text": C.text, "--muted": C.muted,
@@ -1003,9 +1058,25 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
       <header className="bar">
         {home && variant === "app" && <a className="home" href={home.href}>{home.label}</a>}
         <div className="title">
-          <span className="name">{title}</span>
-          <span className="meta">{ready ? `${fmtInt(orders)} orders · ${fmtInt(ready.formulas)} formulas` : "Loading"}</span>
+          <span className="name">{doc.kind === "csv" ? doc.name : title}</span>
+          <span className="meta">
+            {doc.kind === "csv"
+              ? `${fmtInt(doc.dataRows)} rows · ${fmtInt(doc.dataCols)} columns · ${(doc.bytes / 1048576).toFixed(1)} MB`
+              : ready ? `${fmtInt(orders)} orders · ${fmtInt(ready.formulas)} formulas` : "Loading"}
+          </span>
         </div>
+        {variant === "app" && (
+          <>
+            <button className="open" onClick={() => fileRef.current?.click()} disabled={!ready || !!loading}>Open CSV…</button>
+            <input
+              ref={fileRef}
+              type="file"
+              accept=".csv,.tsv,.txt,text/csv,text/tab-separated-values"
+              hidden
+              onChange={(e) => { openFile(e.target.files?.[0]); e.target.value = ""; }}
+            />
+          </>
+        )}
         <div className="formula">
           <span className="namebox">{cellName(sel.col, sel.row)}</span>
           <span className="fx">ƒ</span>
@@ -1023,13 +1094,24 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
         </div>
       </header>
 
-      {variant === "app" && (
+      {variant === "app" && doc.kind === "ledger" && (
         <div className="try">
           <span className="guide">{guide}</span>
           <div className="actions">
             {TRY.map((t) => (
               <button key={t.label} onClick={t.run} disabled={!ready}>{t.label}</button>
             ))}
+          </div>
+        </div>
+      )}
+      {variant === "app" && doc.kind === "csv" && (
+        <div className="try">
+          <span className="guide">
+            Your file, read in {fmtDur(doc.parseMs)} on this machine. Nothing was uploaded. Double-click to edit, or add a formula in an
+            empty column, like <code>=SUM(B:B)</code>.
+          </span>
+          <div className="actions">
+            <button onClick={() => location.reload()}>Back to the ledger demo</button>
           </div>
         </div>
       )}
@@ -1065,6 +1147,17 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
             }}
           />
         )}
+        {loading && (
+          <div className="importing" role="status">
+            <div className="importCard">
+              <span className="importName">{loading.name}</span>
+              <span className="importMeta num">{loading.pct >= 1 ? "Building the sheet…" : `${Math.round(loading.pct * 100)}% · ${fmtInt(loading.rows)} rows`}</span>
+              <span className="importBar"><span style={{ transform: `scaleX(${Math.min(1, loading.pct)})` }} /></span>
+              <span className="importNote">Read on this machine. Nothing is uploaded.</span>
+            </div>
+          </div>
+        )}
+        {dragOver && <div className="dropzone">Drop a CSV to open it. It stays on this machine.</div>}
         <div className="thumb v" ref={vThumbRef} onPointerDown={dragThumb("y")} />
         <div className="thumb h" ref={hThumbRef} onPointerDown={dragThumb("x")} />
         {!ready && (
@@ -1092,6 +1185,11 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
               <b className="num">{fmtDur(lastEdit.ms)}</b>
               {lastEdit.slices > 1 && <> · {lastEdit.slices} slices, the grid stayed live</>}
             </>
+          ) : doc.kind === "csv" ? (
+            <>
+              Read <b className="num">{(doc.bytes / 1048576).toFixed(1)} MB</b> in <b className="num">{fmtDur(doc.parseMs)}</b> ·{" "}
+              <span className="num">{fmtInt(doc.dataRows)}</span> rows on this machine
+            </>
           ) : ready ? (
             <>
               Loaded in <b className="num">{fmtDur(ready.buildMs)}</b> · full recalc of {fmtInt(ready.formulas)} formulas in <b className="num">{fmtDur(ready.recalcMs)}</b> ·{" "}
@@ -1110,7 +1208,7 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
           <div className="right">
             <button className={toggles.heat ? "on" : ""} onClick={() => toggle("heat")}>Recalc heat</button>
             <button className={toggles.arrows ? "on" : ""} onClick={() => toggle("arrows")}>Arrows</button>
-            <button onClick={runBench} disabled={!ready || benchBusy}>{benchBusy ? "Running…" : "Benchmark"}</button>
+            {doc.kind === "ledger" && <button onClick={runBench} disabled={!ready || benchBusy}>{benchBusy ? "Running…" : "Benchmark"}</button>}
             <span className="num frame">draw {drawMs.toFixed(1)} ms</span>
           </div>
         )}

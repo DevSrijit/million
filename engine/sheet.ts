@@ -280,6 +280,27 @@ export class Sheet {
     }
   }
 
+  // Bulk load for imported files: interns a string table once, then copies whole columns.
+  // String cells in `v` hold indexes into `strings`; they are mapped to this sheet's pool.
+  internAll(strings: string[]): Int32Array {
+    const map = new Int32Array(strings.length);
+    for (let i = 0; i < strings.length; i++) map[i] = this.intern(strings[i]);
+    return map;
+  }
+
+  loadColumn(c: number, t: Uint8Array, v: Float64Array, map: Int32Array) {
+    this.finish();
+    const k = this.col(c);
+    const n = Math.min(t.length, this.rows);
+    const kt = k.t, kv = k.v;
+    for (let i = 0; i < n; i++) {
+      const tag = t[i];
+      kt[i] = tag;
+      kv[i] = tag === STR ? map[v[i]] : v[i];
+    }
+    this.colVersion[c]++;
+  }
+
   // Strings interned since index `from`, for the renderer's mirror of the pool.
   stringsFrom(from: number): string[] { return this.strs.slice(from); }
   get stringCount(): number { return this.strs.length; }

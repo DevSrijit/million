@@ -4,6 +4,7 @@
 // messages, so the grid keeps scrolling while 3M cells recompute, and the values update in place.
 import { buildLedger, DEMO_COLS } from "./demo";
 import { ParseError, RecalcStats, Sheet } from "./sheet";
+import { CsvTooLarge, parseCsvFile, NUM, STR } from "./csv";
 
 export type ViewReply = {
   type: "view"; id: number; r0: number; r1: number; cols: number;
@@ -106,22 +107,87 @@ function handle(m: { type: string; [k: string]: any }) {
       const st = sheet.stats();
       syncStrings();
       if (SHARED) post({ type: "formats", formats: sheet.formats, cellFormats: [...sheet.cellFormats] });
-      post({ type: "ready", rows: sheet.rows, cols: DEMO_COLS, buildMs, recalcMs: full.ms, ...st, epoch: sheet.epoch, isolated: self.crossOriginIsolated, shared: SHARED });
+      post({ type: "ready", kind: "ledger", rows: sheet.rows, cols: DEMO_COLS, buildMs, recalcMs: full.ms, ...st, epoch: sheet.epoch, isolated: self.crossOriginIsolated, shared: SHARED });
       break;
     }
     case "view": {
       const r0 = Math.max(0, Math.floor(m.r0)), r1 = Math.min(sheet.rows, Math.ceil(m.r1));
-      const n = (r1 - r0) * DEMO_COLS;
+      const n = (r1 - r0) * sheet.cols;
       const texts = new Array<string>(n);
       const tags = new Uint8Array(n), flags = new Uint8Array(n);
       let k = 0;
-      for (let r = r0; r < r1; r++) for (let c = 0; c < DEMO_COLS; c++, k++) {
+      for (let r = r0; r < r1; r++) for (let c = 0; c < sheet.cols; c++, k++) {
         texts[k] = sheet.display(c, r);
         tags[k] = sheet.tag(c, r);
         flags[k] = (sheet.isFormula(c, r) ? 1 : 0) | (sheet.stamp(c, r) === sheet.epoch ? 2 : 0) | (sheet.isStale(c, r) ? 4 : 0);
       }
-      const out: ViewReply = { type: "view", id: m.id, r0, r1, cols: DEMO_COLS, texts, tags, flags, epoch: sheet.epoch };
+      const out: ViewReply = { type: "view", id: m.id, r0, r1, cols: sheet.cols, texts, tags, flags, epoch: sheet.epoch };
       post(out, [tags.buffer, flags.buffer]);
+      break;
+    }
+    case "loadCsv": {
+      // Read a file on this machine (nothing is uploaded), then swap it in as the sheet.
+      settle();
+      const file = m.file as File;
+      const t0 = performance.now();
+      let lastPost = 0;
+      parseCsvFile(file, (bytes, rows) => {
+        const now = performance.now();
+        if (now - lastPost < 80) return;
+        lastPost = now;
+        post({ type: "csvProgress", name: file.name, bytes, total: file.size, rows });
+      })
+        .then((p) => {
+          const parseMs = performance.now() - t0;
+          if (p.rows === 0) throw new Error("The file has no rows.");
+          const t1 = performance.now();
+          // Room to work: empty columns to the right and rows below for the user's own formulas.
+          const cols = Math.min(p.cols + 6, 702);
+          const rows = p.rows + 200;
+          sentStrings = 0;
+          undo.length = 0; redo.length = 0;
+          sheet = new Sheet(rows, cols, sharedOpts);
+          const map = sheet.internAll(p.strings);
+          for (let c = 0; c < p.cols; c++) { const col = p.column(c); sheet.loadColumn(c, col.t, col.v, map); }
+          sheet.formats = new Array(cols).fill("plain");
+          // A column whose sampled numbers mostly have cents (prices, amounts) shows two decimals.
+          for (let c = 0; c < p.cols; c++) {
+            const { t, v } = p.column(c);
+            let nums = 0, cents = 0;
+            for (let r = 0; r < Math.min(p.rows, 500); r++) {
+              if (t[r] !== NUM) continue;
+              nums++;
+              const x = v[r] * 100;
+              if (Math.abs(x - Math.round(x)) < 1e-6 && !Number.isInteger(v[r])) cents++;
+            }
+            if (nums >= 10 && cents >= nums * 0.5) sheet.formats[c] = "fixed2";
+          }
+          // Column widths from the header and the first rows, like a spreadsheet's auto-fit.
+          const widths: number[] = [];
+          for (let c = 0; c < cols; c++) {
+            if (c >= p.cols) { widths.push(96); continue; }
+            const { t, v } = p.column(c);
+            let len = 3;
+            for (let r = 0; r < Math.min(p.rows, 300); r++) {
+              const tag = t[r];
+              const n = tag === STR ? p.strings[v[r]].length : tag === NUM ? String(+v[r].toPrecision(10)).length : tag ? 5 : 0;
+              if (n > len) len = n;
+            }
+            widths.push(Math.max(56, Math.min(300, Math.round(len * 7.4 + 24))));
+          }
+          const full = sheet.recalcAll();
+          const buildMs = performance.now() - t1;
+          syncStrings();
+          if (SHARED) post({ type: "formats", formats: sheet.formats, cellFormats: [] });
+          const st = sheet.stats();
+          post({
+            type: "ready", kind: "csv", name: file.name, bytes: file.size, header: p.hasHeader, dataRows: p.rows, dataCols: p.cols,
+            rows: sheet.rows, cols, widths, parseMs, buildMs, recalcMs: full.ms, ...st, epoch: sheet.epoch, shared: SHARED,
+          });
+        })
+        .catch((err) => {
+          post({ type: "csvError", name: file.name, message: err instanceof CsvTooLarge ? `${err.message}. Try a smaller file.` : String(err instanceof Error ? err.message : err) });
+        });
       break;
     }
     case "edit":

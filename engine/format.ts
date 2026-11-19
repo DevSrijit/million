@@ -1,6 +1,6 @@
 // Fast number formatting for the viewport. Intl.NumberFormat is too slow to call per cell per frame.
 
-export type NumFormat = "general" | "int" | "id" | "money" | "percent";
+export type NumFormat = "general" | "plain" | "fixed2" | "int" | "id" | "money" | "percent";
 
 function group(intPart: string): string {
   let neg = "";
@@ -16,6 +16,14 @@ function group(intPart: string): string {
 export function formatNumber(x: number, f: NumFormat): string {
   switch (f) {
     case "id": return String(x);
+    case "fixed2": return x.toFixed(2); // imported prices: two decimals, no separators
+    // Imported data: no thousands separators (IDs, years, codes), up to 10 significant digits, like Excel's General.
+    case "plain": {
+      if (Number.isInteger(x) && Math.abs(x) < 1e15) return String(x);
+      const ax = Math.abs(x);
+      if (ax >= 1e15 || (ax < 1e-6 && ax > 0)) return x.toExponential(4);
+      return String(+x.toPrecision(10));
+    }
     case "int": return group(Math.round(x).toString());
     case "money": {
       const s = x.toFixed(2);

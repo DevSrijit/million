@@ -72,3 +72,19 @@ button { font: inherit; }
 .celledit { position: absolute; left: 0; top: 0; height: 26px; z-index: 2; margin: 0; padding: 0 7px; border: 2px solid var(--accent); border-radius: 0; background: var(--bg); color: var(--text); font: 13px var(--font); outline: none; box-shadow: 0 4px 14px rgb(0 0 0 / 0.12); }
 .bar .home { font-weight: 600; letter-spacing: -0.01em; color: var(--text); text-decoration: none; padding-right: 16px; border-right: 1px solid var(--line); }
 .bar .home:hover { color: var(--accent); }
+
+.bar .open { height: 32px; padding: 0 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--text); font: inherit; cursor: pointer; white-space: nowrap; transition: transform 160ms cubic-bezier(0.23, 1, 0.32, 1), background 150ms ease; }
+.bar .open:hover { background: var(--chrome); }
+.bar .open:active { transform: scale(0.97); }
+.bar .open:disabled { opacity: 0.5; cursor: default; }
+.try code { font: 12px var(--mono); background: var(--chrome); border: 1px solid var(--line); border-radius: 5px; padding: 1px 5px; }
+
+/* Import progress and the drop target. */
+.importing { position: absolute; inset: 0; z-index: 3; display: grid; place-items: center; background: color-mix(in srgb, var(--bg) 82%, transparent); backdrop-filter: blur(6px); }
+.importCard { width: min(360px, calc(100% - 32px)); display: flex; flex-direction: column; gap: 8px; padding: 20px; border-radius: 14px; background: var(--bg); border: 1px solid var(--line); box-shadow: 0 12px 40px rgb(0 0 0 / 0.12); }
+.importName { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.importMeta { color: var(--muted); font-size: 12px; }
+.importBar { height: 4px; border-radius: 99px; background: var(--chrome); overflow: hidden; }
+.importBar span { display: block; height: 100%; background: var(--accent); transform-origin: left; transition: transform 120ms linear; }
+.importNote { color: var(--muted); font-size: 12px; }
+.dropzone { position: absolute; inset: 12px; z-index: 3; display: grid; place-items: center; border: 2px dashed var(--accent); border-radius: 14px; background: rgba(var(--accent-rgb), 0.06); color: var(--accent); font-weight: 500; pointer-events: none; }
