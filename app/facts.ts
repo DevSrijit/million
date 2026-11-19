@@ -1,4 +1,5 @@
-// Every number on the landing pages comes from docs/phase-1-report.md (Chrome, production build).
+// Every number on the landing page was measured: in Chrome (production build) with the in-app
+// Benchmark, and in Bun with bench/engine.ts and bench/hyperformula/hf.ts.
 export const NAME = "Million";
 // Numbers and units are joined with a no-break space, so a unit never wraps alone.
 export const FACTS = {

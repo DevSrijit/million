@@ -1,7 +1,7 @@
 "use client";
 
-// Engine harness for the spike. The grid is one canvas. Scrolling is our own (no 26M px spacer div),
-// the worker sends only the visible window, and numbers draw from a tabular glyph atlas.
+// The spreadsheet UI. The grid is one canvas. Scrolling is our own (no 26M px spacer div). The grid
+// reads engine columns from shared memory, and numbers draw from a tabular glyph atlas.
 
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { ViewReply } from "@/engine/worker";

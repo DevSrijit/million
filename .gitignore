@@ -5,3 +5,6 @@ next-env.d.ts
 .impeccable/
 .vercel
 .env*
+
+# Private notes, kept on disk only.
+docs/*.md

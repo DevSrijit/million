@@ -8,7 +8,7 @@ Change one cell, and only the cells that depend on it recalculate. A small edit 
 
 **Try it: [millionrows.vercel.app](https://millionrows.vercel.app)**. The cursor on the landing page is a script that drives the real engine. Click the sheet to take it over, or open [the full app](https://millionrows.vercel.app/sheet).
 
-![The landing page demo. A scripted cursor types 18 into the Units column, and 1,000,010 cells recompute. It goes to K2 with the name box and sets the tax rate to 12%, and 3,000,008 cells recompute in 207 ms across 18 slices. It drags across the four region totals, then types =MAX(K5:K8) while K5 to K8 light up as references.](docs/media/autopilot.webp)
+![A million rows. Every formula live. The demo ledger in a Mac window: orders with Units, Price, Revenue, Tax, Total and a Running total, next to a summary panel with the tax rate, the grand total and a total for each region.](docs/media/social.png)
 
 Everything runs on your machine. There is no server, no account and no upload. A CSV that you open stays in the page.
 
@@ -41,7 +41,7 @@ The engine keeps the sheet in 129 MB of typed arrays.
 | Change the units of one order | 0.005 ms | 2,062 ms |
 | Change the tax rate | 147 ms | 12,006 ms |
 
-HyperFormula does much more than Million: hundreds of functions, named ranges, sheets that reference each other, and an undo history of structural changes. The comparison shows what a narrow engine built around this kind of workbook can do. It does not say that HyperFormula is slow at its own job. The full tables are in [the phase 1 report](docs/phase-1-report.md).
+HyperFormula does much more than Million: hundreds of functions, named ranges, sheets that reference each other, and an undo history of structural changes. The comparison shows what a narrow engine built around this kind of workbook can do. It does not say that HyperFormula is slow at its own job. To run the comparison yourself, see [Run it on your computer](#run-it-on-your-computer).
 
 ## How it works
 
@@ -96,7 +96,7 @@ The page is cross-origin isolated (COOP and COEP headers), so the engine's colum
 ## Honesty rules
 
 - A million rows is not more than Excel. The ledger has 1,000,001 rows, and Excel allows 1,048,576. The point is that every formula in the sheet stays live and a small edit costs microseconds.
-- Every number on this page and on the site was measured, and the method is in the reports in `docs/`. The times change with the machine and the browser.
+- Every number on this page and on the site was measured. Small edits are timed as a batch of 50 and divided, and each result is the median of 7 rounds. The times change with the machine and the browser. Run `bun run bench`, or press **Benchmark** in the app, to measure your own.
 - Million is a study of one engine design, not a replacement for Excel or Sheets. It has one sheet, no saving, no charts and the functions listed below.
 
 ## Functions
@@ -186,7 +186,7 @@ cd bench/hyperformula && bun install && bun hf.ts 100000
 | `components/axis-lock.ts` | The soft axis lock for trackpad scrolling |
 | `components/touch-pan.ts` | Touch panning and momentum |
 | `app/` | The landing page (`/`) and the app (`/sheet`) |
-| `docs/` | The reports from each phase, with the measurements |
+| `bench/` | The engine benchmark, and the HyperFormula comparison in its own package |
 
 Built with Next.js 16, React 19 and TypeScript. The engine and the grid use no libraries.
 
