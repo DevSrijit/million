@@ -48,7 +48,7 @@ kbd { font: 500 11px var(--font); color: var(--muted); letter-spacing: 0.02em; }
 
 /* ---------- Header: three columns, the formula bar on the true centre ---------- */
 .bar {
-  display: grid; grid-template-columns: minmax(0, 1fr) minmax(360px, 640px) minmax(0, 1fr); align-items: center; column-gap: 16px;
+  display: grid; grid-template-columns: minmax(240px, 1fr) minmax(360px, 640px) minmax(240px, 1fr); align-items: center; column-gap: 16px;
   height: 48px; padding: 0 16px; border-bottom: 1px solid var(--line); background: var(--bg);
 }
 .barStart { display: flex; align-items: center; min-width: 0; }
@@ -61,6 +61,12 @@ kbd { font: 500 11px var(--font); color: var(--muted); letter-spacing: 0.02em; }
 /* Name and meta on one baseline. The meta line gives way first when space runs out. */
 .title { display: flex; align-items: baseline; gap: 8px; min-width: 0; white-space: nowrap; }
 .title .name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-weight: 600; letter-spacing: -0.01em; }
+.title .name.split { display: inline-flex; overflow: visible; }
+.title .name.split .head { min-width: 1ch; overflow: hidden; text-overflow: ellipsis; white-space: pre; }
+.title .name.split .tail { flex: none; white-space: pre; }
+/* The left column is a size container: when it gets narrow, the meta line hides instead of clipping. */
+.barStart { container-type: inline-size; }
+@container (max-width: 380px) { .title .meta { display: none; } }
 .title .meta { flex: 0 1000 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 
 .formula {
@@ -83,8 +89,8 @@ kbd { font: 500 11px var(--font); color: var(--muted); letter-spacing: 0.02em; }
 
 .bar .open { height: var(--control); padding: 0 10px 0 12px; font-weight: 500; }
 
-@media (max-width: 860px) {
-  .bar { grid-template-columns: auto minmax(0, 1fr) auto; }
+@media (max-width: 920px) {
+  .bar { grid-template-columns: minmax(150px, 30%) minmax(0, 1fr) auto; }
   .title .meta, .bar .open kbd { display: none; }
 }
 @media (max-width: 640px) {

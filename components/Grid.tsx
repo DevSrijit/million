@@ -204,6 +204,19 @@ function fromTSV(text: string): string[][] {
 }
 const MAX_COPY = 200_000; // cells; a bigger block would freeze the page while it is formatted
 
+// A name that truncates in the middle, like Finder: "6-LATER-rest-ea…batch-2.csv". The end of the
+// name and its extension stay readable; the start gives way first.
+function MiddleName({ text }: { text: string }) {
+  const keep = Math.min(14, Math.max(0, text.length - 8));
+  if (text.length <= 22) return <span className="name">{text}</span>;
+  return (
+    <span className="name split">
+      <span className="head">{text.slice(0, text.length - keep)}</span>
+      <span className="tail">{text.slice(text.length - keep)}</span>
+    </span>
+  );
+}
+
 export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant = "app", autoplay = false, title = "Sales ledger", home }: GridProps) {
   applyTheme(theme);
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -1405,10 +1418,10 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
             </>
           )}
           <div className="title" title={doc.kind === "csv" ? `${doc.name}: ${fmtInt(doc.dataRows)} rows, ${fmtInt(doc.dataCols)} columns` : `${title}: ${fmtInt(orders)} orders, ${ready ? fmtInt(ready.formulas) : "…"} formulas`}>
-            <span className="name">{doc.kind === "csv" ? doc.name : title}</span>
+            <MiddleName text={doc.kind === "csv" ? doc.name : title} />
             <span className="meta">
               {doc.kind === "csv"
-                ? `${fmtInt(doc.dataRows)} rows · ${fmtInt(doc.dataCols)} columns · ${(doc.bytes / 1048576).toFixed(1)} MB`
+                ? `${fmtInt(doc.dataRows)} rows · ${fmtInt(doc.dataCols)} cols`
                 : ready ? `${fmtInt(ready.formulas)} live formulas` : "Loading"}
             </span>
           </div>
