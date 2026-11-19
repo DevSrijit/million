@@ -5,6 +5,11 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ViewReply } from "@/engine/worker";
+import { formatNumber, type NumFormat } from "@/engine/format";
+import { lockAxis, newAxisState } from "./axis-lock";
+
+const ERRS = ["#DIV/0!", "#VALUE!", "#REF!", "#NAME?", "#NUM!", "#N/A", "#CYCLE!"];
+type SharedCol = { v: Float64Array; t: Uint8Array; f: Int32Array | null; st: Uint8Array | null; stamp: Uint32Array | null };
 
 const ORDERS = 1_000_000;
 const ROW_H = 26;
@@ -164,7 +169,13 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
     pendingEdit: false, // a double-click before the cell's input arrived from the worker
     touched: false, // the visitor used the grid: autoplay stops
     pageScrollAt: 0, wheelLast: 0, gridGesture: false, // embed wheel routing, per gesture
-    wheelAxis: 0, axisDx: 0, axisDy: 0, // the axis this wheel gesture is locked to
+    axis: newAxisState(), // the soft axis lock for wheel scrolling
+    // Shared memory: engine columns read directly, no view messages.
+    shared: false,
+    cols: [] as (SharedCol | undefined)[],
+    strs: [] as string[],
+    formats: [] as NumFormat[],
+    cellFormats: new Map<number, NumFormat>(),
     inspectId: 0,
   }).current;
 
@@ -192,6 +203,7 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
   const requestView = useCallback(() => {
     const w = workerRef.current;
     if (!w || !s.rows) return;
+    if (s.shared) { redraw(); return; } // the renderer reads engine memory: nothing to fetch
     if (s.inflight) { s.pending = true; return; }
     const first = 1 + Math.floor(s.scrollY / ROW_H);
     const count = Math.ceil(viewH() / ROW_H) + 1;
@@ -232,7 +244,7 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
     if (!s.atlas || s.atlas.color !== C.text) s.atlas = buildAtlas(s.dpr);
     const atlas = s.atlas;
     s.frames++;
-    if (!s.body || s.body.r0 > first || s.body.r1 < Math.min(s.rows, first + count)) s.missFrames++;
+    if (!s.shared && (!s.body || s.body.r0 > first || s.body.r1 < Math.min(s.rows, first + count))) s.missFrames++;
     (window as unknown as { __grid: object }).__grid = { frames: s.frames, missFrames: s.missFrames, drawMs: s.drawMs, scrollX: s.scrollX, scrollY: s.scrollY };
 
     const drawNumber = (text: string, right: number, y: number) => {
@@ -247,7 +259,41 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
       }
     };
 
+    const drawRowShared = (r: number, y: number, bold: boolean) => {
+      for (let c = 0; c < COL_W.length; c++) {
+        const x = xOf(c), w = COL_W[c];
+        if (x + w < RHDR_W || x > s.w) continue;
+        const col = s.cols[c];
+        if (!col) continue;
+        if (heatA > 0 && col.stamp && col.stamp[r] === s.editEpoch) {
+          ctx.fillStyle = tint(+(0.2 * heatA).toFixed(3));
+          ctx.fillRect(x, y, w, ROW_H);
+        }
+        const tag = col.t[r];
+        if (tag === 0) continue;
+        const val = col.v[r];
+        const text = tag === 1 ? formatNumber(val, s.cellFormats.get(c * s.rows + r) ?? s.formats[c] ?? "general")
+          : tag === 2 ? (s.strs[val] ?? "") : tag === 3 ? (val ? "TRUE" : "FALSE") : ERRS[val];
+        if (!text) continue;
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(x, y, w, ROW_H);
+        ctx.clip();
+        // A stale cell: a running recalc has not reached it yet.
+        if (col.st && col.st[r] !== 0) ctx.globalAlpha = 0.3;
+        if (tag === 1) drawNumber(text, x + w - 8, y);
+        else {
+          ctx.font = bold ? FONT_BOLD : FONT;
+          ctx.fillStyle = tag === 4 ? C.error : C.text;
+          ctx.textAlign = tag === 3 || tag === 4 ? "center" : "left";
+          ctx.fillText(text, tag === 3 || tag === 4 ? x + w / 2 : x + 8, y + ROW_H / 2 + 0.5);
+        }
+        ctx.restore();
+      }
+    };
+
     const drawRow = (v: ViewReply | null, r: number, y: number, bold: boolean) => {
+      if (s.shared) { drawRowShared(r, y, bold); return; }
       if (!v || r < v.r0 || r >= v.r1) {
         // Not sent by the worker yet: a quiet placeholder instead of an empty row.
         ctx.fillStyle = C.skeleton;
@@ -525,7 +571,19 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
     w.onmessage = (e: MessageEvent) => {
       const m = e.data;
       switch (m.type) {
+        case "column":
+          s.cols[m.c] = { v: m.v, t: m.t, f: m.f, st: m.st, stamp: m.stamp };
+          break;
+        case "strings":
+          for (let i = 0; i < m.list.length; i++) s.strs[m.from + i] = m.list[i];
+          redraw();
+          break;
+        case "formats":
+          s.formats = m.formats;
+          s.cellFormats = new Map(m.cellFormats);
+          break;
         case "ready":
+          s.shared = !!m.shared;
           s.rows = m.rows;
           s.wantEpoch = m.epoch;
           setReady(m);
@@ -641,15 +699,9 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
       s.wheelLast = now;
       let dx = e.shiftKey ? e.deltaY : e.deltaX;
       let dy = e.shiftKey ? 0 : e.deltaY;
-      // Axis lock, like native scroll views: a trackpad swipe always carries some sideways motion.
-      // Each gesture takes the axis of its first clear movement and ignores the other one.
-      if (fresh) { s.wheelAxis = 0; s.axisDx = 0; s.axisDy = 0; }
-      if (s.wheelAxis === 0) {
-        s.axisDx += Math.abs(dx);
-        s.axisDy += Math.abs(dy);
-        if (s.axisDx + s.axisDy > 4) s.wheelAxis = s.axisDx > s.axisDy * 1.5 ? 1 : 2; // 1 = x, 2 = y
-      }
-      if (s.wheelAxis === 1) dy = 0; else dx = 0; // until the axis is known, scroll only vertically
+      // Soft axis lock: no sideways drift on a vertical swipe, but a deliberate swipe on the other
+      // axis wins within a few events, even through momentum. See axis-lock.ts.
+      [dx, dy] = lockAxis(s.axis, dx, dy, fresh);
       if (variant === "embed") {
         if (fresh) s.gridGesture = s.touched || now - s.pageScrollAt > 200;
         if (!s.gridGesture) return;
@@ -801,7 +853,7 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
   const dragThumb = (axis: "x" | "y") => (e: React.PointerEvent) => {
     e.stopPropagation();
     const el = e.currentTarget as HTMLElement;
-    el.setPointerCapture(e.pointerId);
+    try { el.setPointerCapture(e.pointerId); } catch { /* the pointer is gone: drag without capture */ }
     const start = axis === "y" ? e.clientY : e.clientX;
     const startScroll = axis === "y" ? s.scrollY : s.scrollX;
     const track = axis === "y" ? s.h - HEAD_H - ROW_H - 8 - el.offsetHeight : s.w - RHDR_W - 16 - el.offsetWidth;

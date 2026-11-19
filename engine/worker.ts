@@ -15,6 +15,25 @@ export type ViewReply = {
 const SLICE_MS = 8;
 
 let sheet: Sheet;
+
+// Shared memory: when the page is cross-origin isolated, every column lives in SharedArrayBuffers.
+// The worker posts each column's buffers once; the renderer then reads cells straight from engine
+// memory, so any scroll speed, even a scrollbar drag across a million rows, draws real values.
+const SHARED = (self as unknown as { crossOriginIsolated?: boolean }).crossOriginIsolated === true && typeof SharedArrayBuffer !== "undefined";
+const sharedOpts = SHARED
+  ? {
+      alloc: (bytes: number) => new SharedArrayBuffer(bytes),
+      onColumn: (c: number, col: { v: Float64Array; t: Uint8Array; f: Int32Array | null; st: Uint8Array | null; stamp: Uint32Array | null }) =>
+        post({ type: "column", c, v: col.v, t: col.t, f: col.f, st: col.st, stamp: col.stamp }),
+    }
+  : {};
+// The renderer mirrors the string pool; this is how much of it it has.
+let sentStrings = 0;
+function syncStrings() {
+  if (!SHARED || !sheet || sheet.stringCount === sentStrings) return;
+  post({ type: "strings", from: sentStrings, list: sheet.stringsFrom(sentStrings) });
+  sentStrings = sheet.stringCount;
+}
 const post = (msg: unknown, transfer: Transferable[] = []) => (self as unknown as Worker).postMessage(msg, transfer);
 
 // Undo history: inputs before and after each edit.
@@ -33,6 +52,7 @@ const yieldThenPump = () => channel.port2.postMessage(null);
 function reply(st: RecalcStats) {
   const r = running!;
   running = null;
+  syncStrings();
   post({ type: "edited", col: r.col, row: r.row, slices: r.slices, kind: r.kind, ...st });
 }
 
@@ -41,6 +61,7 @@ function pump() {
   running.slices++;
   const st = sheet.step(SLICE_MS);
   if (st) { reply(st); return; }
+  syncStrings();
   post({ type: "progress", epoch: sheet.epoch, col: running.col, row: running.row });
   yieldThenPump();
 }
@@ -78,11 +99,14 @@ function handle(m: { type: string; [k: string]: any }) {
   switch (m.type) {
     case "init": {
       const t0 = performance.now();
-      sheet = buildLedger(m.orders);
+      sentStrings = 0;
+      sheet = buildLedger(m.orders, sharedOpts);
       const buildMs = performance.now() - t0;
       const full = sheet.recalcAll();
       const st = sheet.stats();
-      post({ type: "ready", rows: sheet.rows, cols: DEMO_COLS, buildMs, recalcMs: full.ms, ...st, epoch: sheet.epoch, isolated: self.crossOriginIsolated });
+      syncStrings();
+      if (SHARED) post({ type: "formats", formats: sheet.formats, cellFormats: [...sheet.cellFormats] });
+      post({ type: "ready", rows: sheet.rows, cols: DEMO_COLS, buildMs, recalcMs: full.ms, ...st, epoch: sheet.epoch, isolated: self.crossOriginIsolated, shared: SHARED });
       break;
     }
     case "view": {
@@ -148,6 +172,7 @@ function handle(m: { type: string; [k: string]: any }) {
       });
       const t = performance.now();
       const full = sheet.recalcAll();
+      syncStrings();
       post({ type: "bench", results, full: { ms: performance.now() - t, recomputed: full.recomputed }, epoch: sheet.epoch });
       break;
     }

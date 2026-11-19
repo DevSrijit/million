@@ -38,7 +38,7 @@ const ERR_OBJ = ERRORS.map((_, i) => new CellError(i));
 
 export type Value = number | string | boolean | null | CellError;
 
-type Column = {
+export type Column = {
   v: Float64Array;
   t: Uint8Array;
   f: Int32Array | null;
@@ -123,8 +123,15 @@ export class Sheet {
 
   readonly cacheMin: number;
 
-  constructor(rows: number, cols: number, opts: { cacheMin?: number } = {}) {
+  // Memory for column arrays. The worker passes a SharedArrayBuffer allocator, so the renderer on
+  // the main thread can read cells straight from engine memory. onColumn reports every new array.
+  private alloc: (bytes: number) => ArrayBufferLike;
+  private onColumn?: (c: number, col: Column) => void;
+
+  constructor(rows: number, cols: number, opts: { cacheMin?: number; alloc?: (bytes: number) => ArrayBufferLike; onColumn?: (c: number, col: Column) => void } = {}) {
     this.cacheMin = opts.cacheMin ?? CACHE_MIN;
+    this.alloc = opts.alloc ?? ((n) => new ArrayBuffer(n));
+    this.onColumn = opts.onColumn;
     this.rows = rows;
     this.cols = cols;
     this.c = new Array(cols);
@@ -144,10 +151,11 @@ export class Sheet {
   private col(c: number): Column {
     let k = this.c[c];
     if (!k) {
-      k = { v: new Float64Array(this.rows), t: new Uint8Array(this.rows), f: null, st: null, stamp: null };
+      k = { v: new Float64Array(this.alloc(this.rows * 8)), t: new Uint8Array(this.alloc(this.rows)), f: null, st: null, stamp: null };
       this.c[c] = k;
       this.V[c] = k.v;
       this.T[c] = k.t;
+      this.onColumn?.(c, k);
     }
     return k;
   }
@@ -155,9 +163,10 @@ export class Sheet {
   private formulaCol(c: number): Column {
     const k = this.col(c);
     if (!k.f) {
-      k.f = new Int32Array(this.rows);
-      k.st = new Uint8Array(this.rows);
-      k.stamp = new Uint32Array(this.rows);
+      k.f = new Int32Array(this.alloc(this.rows * 4));
+      k.st = new Uint8Array(this.alloc(this.rows));
+      k.stamp = new Uint32Array(this.alloc(this.rows * 4));
+      this.onColumn?.(c, k);
     }
     return k;
   }
@@ -270,6 +279,10 @@ export class Sheet {
       default: return "";
     }
   }
+
+  // Strings interned since index `from`, for the renderer's mirror of the pool.
+  stringsFrom(from: number): string[] { return this.strs.slice(from); }
+  get stringCount(): number { return this.strs.length; }
 
   tag(c: number, r: number): number { return this.c[c]?.t[r] ?? EMPTY; }
   stamp(c: number, r: number): number { return this.c[c]?.stamp?.[r] ?? 0; }

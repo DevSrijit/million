@@ -3,14 +3,14 @@
 //   A Order   B Region   C Units   D Price   E Revenue =C*D   F Tax =E*$K$2   G Total =E+F   H Running total =H(prev)+G
 //   J/K: a summary panel. K2 is the tax rate that every row reads (the worst-case edit).
 
-import { Sheet } from "./sheet";
+import { Sheet, Column } from "./sheet";
 
 export const DEMO_COLS = 12; // A..L
 export const REGIONS = ["North", "South", "East", "West"];
 
-export function buildLedger(orders: number): Sheet {
+export function buildLedger(orders: number, opts: { alloc?: (bytes: number) => ArrayBufferLike; onColumn?: (c: number, col: Column) => void } = {}): Sheet {
   const rows = orders + 1;
-  const s = new Sheet(rows, DEMO_COLS);
+  const s = new Sheet(rows, DEMO_COLS, opts);
   const headers = ["Order", "Region", "Units", "Price", "Revenue", "Tax", "Total", "Running total"];
   headers.forEach((h, c) => s.setString(c, 0, h));
 
