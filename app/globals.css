@@ -89,6 +89,8 @@ kbd { font: 500 11px var(--font); color: var(--muted); letter-spacing: 0.02em; }
 
 .bar .open { height: var(--control); padding: 0 10px 0 12px; font-weight: 500; }
 
+/* The hero has no title and no buttons: its empty side columns need no minimum. */
+@media (min-width: 921px) { .app.embed .bar { grid-template-columns: minmax(0, 1fr) minmax(360px, 640px) minmax(0, 1fr); } }
 @media (max-width: 920px) {
   .bar { grid-template-columns: minmax(150px, 30%) minmax(0, 1fr) auto; }
   .title .meta, .bar .open kbd { display: none; }
@@ -168,4 +170,33 @@ kbd { font: 500 11px var(--font); color: var(--muted); letter-spacing: 0.02em; }
   /* Keep colour and opacity changes; drop movement. */
   .ctl:active:not(:disabled) { transform: none; }
   .panel { transition: opacity 120ms linear; @starting-style { transform: none; } }
+}
+
+/* The hero autopilot's cursor (autopilot.ts). It moves by transform only. */
+.app { position: relative; }
+.pilotCursor {
+  position: absolute; left: -2px; top: -1.5px; z-index: 30; pointer-events: none;
+  opacity: 0; transform: translate(0, 0);
+  transition-property: transform, opacity; transition-timing-function: cubic-bezier(0.45, 0, 0.2, 1), ease-out;
+  filter: drop-shadow(0 1px 1.5px rgba(0, 0, 0, 0.28));
+}
+.pilotCursor.on { opacity: 1; }
+.pilotCursor svg { display: block; transform-origin: 2px 2px; }
+.pilotCursor.press svg { animation: pilotPress 260ms var(--ease-out); }
+.pilotCursor::after {
+  /* The click ring: it starts at the tip and fades. */
+  content: ""; position: absolute; left: -9px; top: -8.5px; width: 22px; height: 22px; border-radius: 50%;
+  border: 1.5px solid rgba(var(--accent-rgb), 0.55); opacity: 0; transform: scale(0.4);
+}
+.pilotCursor.press::after { animation: pilotRing 520ms var(--ease-out); }
+@keyframes pilotPress { 40% { transform: scale(0.86); } }
+@keyframes pilotRing { 0% { opacity: 1; transform: scale(0.4); } 100% { opacity: 0; transform: scale(1.5); } }
+.pilotCaret { position: absolute; left: 0; top: 0; z-index: 3; width: 1.5px; height: 14px; background: var(--accent); pointer-events: none; display: none; }
+.pilotCaret.on { display: block; animation: pilotBlink 1s steps(1) infinite; }
+@keyframes pilotBlink { 50% { opacity: 0; } }
+/* On a phone the hero has nothing beside the formula bar: one row, no empty title row. */
+@media (max-width: 640px) {
+  .app.embed .barStart, .app.embed .barEnd { display: none; }
+  .app.embed .bar { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto; padding-top: 8px; }
+  .app.embed .formula { grid-row: 1; }
 }

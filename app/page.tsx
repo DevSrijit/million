@@ -6,7 +6,7 @@ import css from "./landing.module.css";
 
 // The landing page, in the "Numbers" direction: a light Apple product page. One centred idea,
 // the live product in a window, measured numbers, then how it works. Colour appears only in the
-// grid's recalc flash and the links.
+// grid's recalc flash, the links, and the window's traffic lights.
 
 const IDEAS = [
   {
@@ -68,16 +68,18 @@ export default function Landing() {
 
       <section className={css.window} aria-label="The live ledger">
         <div className={css.chrome}>
-          <span className={css.dot} />
-          <span className={css.dot} />
-          <span className={css.dot} />
-          <span className={css.file}>Sales ledger — {FACTS.rows} rows</span>
+          <span className={css.lights} aria-hidden>
+            <span className={css.light} />
+            <span className={css.light} />
+            <span className={css.light} />
+          </span>
+          <span className={css.file}>Sales ledger <span>{FACTS.rows} rows</span></span>
         </div>
         <div className={css.grid}>
           <Grid theme={THEMES.numbers} variant="embed" autoplay />
         </div>
       </section>
-      <p className={css.caption}>Live, not a video. The tax rate changes every few seconds until you click. Then it is yours: double-click any cell.</p>
+      <p className={css.caption}>Live, not a video. The cursor is a script that drives the real engine. Click anywhere in the sheet and it is yours.</p>
 
       <section className={css.stats}>
         <div>

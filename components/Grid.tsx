@@ -7,6 +7,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { ViewReply } from "@/engine/worker";
 import { formatNumber, type NumFormat } from "@/engine/format";
 import { lockAxis, newAxisState } from "./axis-lock";
+import { Cancelled, runPilot, type PilotApi } from "./autopilot";
 
 const ERRS = ["#DIV/0!", "#VALUE!", "#REF!", "#NAME?", "#NUM!", "#N/A", "#CYCLE!"];
 type SharedCol = { v: Float64Array; t: Uint8Array; f: Int32Array | null; st: Uint8Array | null; stamp: Uint32Array | null };
@@ -226,6 +227,9 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
   const hThumbRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const editorRef = useRef<HTMLInputElement>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const cursorRef = useRef<HTMLDivElement>(null);
+  const caretRef = useRef<HTMLDivElement>(null);
   const workerRef = useRef<Worker | null>(null);
 
   // Mutable render state. React state is only for the bars.
@@ -248,6 +252,10 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
     pointCell: null as { col: number; row: number } | null,
     pendingEdit: false, // a double-click before the cell's input arrived from the worker
     touched: false, // the visitor used the grid: autoplay stops
+    piloting: false, // the hero autopilot drives the grid: the selection draws as focused
+    pilotStop: null as null | (() => void), // cancels the autopilot and discards its half-typed text
+    pilotWait: null as null | (() => void), // resolves when the engine finishes the autopilot's edit
+    inView: true, // the grid is on screen: the autopilot pauses when it is not
     gridFocused: false, // the selection draws in the accent only while the grid has focus
     corner: { col: 0, row: 1 }, // the moving end of the range; the active cell (sel) stays put, like Excel
     copied: null as { c0: number; r0: number; c1: number; r1: number } | null, // dashed outline after a copy
@@ -339,7 +347,14 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
     const heatA = heatAlpha * heatAlpha;
 
     const xOf = (c: number) => RHDR_W + COL_X[c] - s.scrollX;
-    const yOf = (r: number) => (r === 0 ? HEAD_H : bodyTop + (r - first) * ROW_H + offY);
+    // In the frozen pass of the overlays, scrolled rows stop at the frozen row's lower edge, so a
+    // cell half under the frozen row cannot draw its border on top of it.
+    let clampBody = false;
+    const yOf = (r: number) => {
+      if (r === 0) return HEAD_H;
+      const y = bodyTop + (r - first) * ROW_H + offY;
+      return clampBody ? Math.max(bodyTop, y) : y;
+    };
     if (!s.atlas || s.atlas.color !== C.text) s.atlas = buildAtlas(s.dpr);
     const atlas = s.atlas;
     s.frames++;
@@ -471,9 +486,15 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
     const ins = s.inspect;
     const visible = (r: number) => r === 0 || (r >= first && r < first + count);
     const rectOf = (c: number, r: number) => ({ x: xOf(c), y: yOf(r), w: COL_W[c], h: ROW_H });
+    // Two passes: the scrolling body, then the frozen row. One clip for both let a cell scrolled
+    // half under the frozen row draw its border over it.
+    let landA = 0;
+    for (const frozenPass of [false, true]) {
+    clampBody = frozenPass;
     ctx.save();
     ctx.beginPath();
-    ctx.rect(RHDR_W, HEAD_H, s.w - RHDR_W, s.h - HEAD_H);
+    if (frozenPass) ctx.rect(RHDR_W, HEAD_H, s.w - RHDR_W, ROW_H);
+    else ctx.rect(RHDR_W, bodyTop, s.w - RHDR_W, s.h - bodyTop);
     ctx.clip();
     const sr = rectOf(s.sel.col, s.sel.row);
     if (s.cellEdit && s.editText.startsWith("=")) {
@@ -563,9 +584,9 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
     if (g.c0 !== g.c1 || g.r0 !== g.r1) {
       const b = blockRect(g);
       if (b) {
-        ctx.fillStyle = tint(s.gridFocused ? 0.08 : 0.05);
+        ctx.fillStyle = tint(s.gridFocused || s.piloting ? 0.08 : 0.05);
         ctx.fillRect(b.x0, b.y0, b.x1 - b.x0, b.y1 - b.y0);
-        ctx.strokeStyle = s.gridFocused ? C.accent : C.muted;
+        ctx.strokeStyle = s.gridFocused || s.piloting ? C.accent : C.muted;
         ctx.lineWidth = 1;
         ctx.strokeRect(b.x0 + 0.5, b.y0 + 0.5, b.x1 - b.x0 - 1, b.y1 - b.y0 - 1);
       }
@@ -582,7 +603,6 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
       }
     }
     // The cell an edit just wrote keeps a fading outline, so the eye can follow it after Return moves down.
-    let landA = 0;
     if (s.landed) {
       landA = Math.max(0, 1 - (performance.now() - s.landed.at) / LAND_MS);
       const L = s.landed;
@@ -599,11 +619,14 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
       }
     }
     if (visible(s.sel.row)) {
-      ctx.strokeStyle = s.gridFocused || s.cellEdit ? C.accent : C.muted;
+      ctx.strokeStyle = s.gridFocused || s.piloting || s.cellEdit ? C.accent : C.muted;
       ctx.lineWidth = 2;
       ctx.strokeRect(sr.x + 1, sr.y + 1, sr.w - 2, sr.h - 2);
     }
     ctx.restore();
+    }
+    clampBody = false;
+    const g = rangeOf(); // the header highlights below read the selected block too
 
     // Column header.
     ctx.fillStyle = C.headBg;
@@ -676,6 +699,13 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
       ed.style.visibility = vis ? "visible" : "hidden";
       ed.style.transform = `translate(${xOf(ce.col)}px, ${yOf(ce.row)}px)`;
       ed.style.width = `${Math.max(COL_W[ce.col], Math.min(s.w - xOf(ce.col) - 8, textWidth(s.editText) + 20))}px`;
+    }
+    // The autopilot types into an editor without focus, so the browser draws no caret. Draw one.
+    const caret = caretRef.current;
+    if (caret) {
+      const on = !!(s.piloting && s.cellEdit && visible(s.cellEdit.row));
+      caret.classList.toggle("on", on);
+      if (on) caret.style.transform = `translate(${xOf(s.cellEdit!.col) + 9 + textWidth(s.editText)}px, ${yOf(s.cellEdit!.row) + 6}px)`;
     }
 
     s.drawMs = s.drawMs * 0.9 + (performance.now() - t0) * 0.1;
@@ -851,6 +881,7 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
           setLastEdit({ ...m, name: cellName(m.col, m.row) });
           if (m.kind === "paste" || m.kind === "clear") s.copied = null;
           if (m.kind === "edit") s.landed = { col: m.col, row: m.row, at: performance.now() };
+          s.pilotWait?.();
           // An undo or redo shows the cell it changed, like Numbers and Excel.
           if (m.kind === "undo" || m.kind === "redo") select(m.col, m.row);
           s.body = s.body && { ...s.body, epoch: -1 };
@@ -859,6 +890,7 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
           w.postMessage({ type: "inspect", id: ++s.inspectId, col: s.sel.col, row: s.sel.row });
           break;
         case "editError":
+          s.pilotWait?.();
           if (m.quiet) { setError(m.message); break; }
           // Reopen the cell editor with the user's text, so they can fix it.
           select(m.col, m.row);
@@ -953,6 +985,7 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
         if (fresh) s.gridGesture = s.touched || now - s.pageScrollAt > 200;
         if (!s.gridGesture) return;
         if (dx === 0 && ((dy < 0 && s.scrollY <= 0) || (dy > 0 && s.scrollY >= maxY()))) return;
+        s.pilotStop?.(); // the visitor scrolls the grid: the autopilot must not scroll it back
       }
       e.preventDefault();
       const k = e.deltaMode === 1 ? ROW_H : e.deltaMode === 2 ? viewH() : 1;
@@ -1383,17 +1416,157 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
     },
   ];
 
-  // Embed autoplay: the hero changes the tax rate every few seconds, so a visitor sees 3M cells
-  // recompute before they touch anything. It stops for good at the first click or key press.
+  // Embed autoplay. The hero runs the autopilot (autopilot.ts): a cursor that clicks, types and
+  // drags in the real grid. With reduced motion there is no cursor: the tax rate changes in place
+  // every few seconds instead. Both pause off screen and in a hidden tab, and stop for good at the
+  // visitor's first touch.
   useEffect(() => {
-    if (!autoplay || !ready) return;
-    const rates = ["12%", "5%", "8%"];
-    let i = 0;
-    const id = setInterval(() => {
-      if (s.touched || document.hidden) return;
-      workerRef.current?.postMessage({ type: "edit", col: 10, row: 1, text: rates[i++ % rates.length] });
-    }, 3200);
-    return () => clearInterval(id);
+    if (!autoplay || !ready || s.touched) return;
+    const root = rootRef.current;
+    const io = new IntersectionObserver(([e]) => { s.inView = e.isIntersecting; }, { threshold: 0.35 });
+    if (root) io.observe(root);
+    const live = () => !document.hidden && s.inView;
+
+    if (matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      const rates = ["12%", "5%", "8%"];
+      let i = 0;
+      const id = setInterval(() => {
+        if (s.touched || !live()) return;
+        workerRef.current?.postMessage({ type: "edit", col: 10, row: 1, text: rates[i++ % rates.length] });
+      }, 3200);
+      return () => { clearInterval(id); io.disconnect(); };
+    }
+
+    const token = { cancelled: false };
+    const cursor = cursorRef.current;
+    if (!cursor || !root) return () => io.disconnect();
+    const place = (x: number, y: number, ms: number) => {
+      cursor.style.transitionDuration = `${ms}ms`;
+      cursor.style.transform = `translate(${Math.round(x)}px, ${Math.round(y)}px)`;
+    };
+    let at = { x: 0, y: 0 };
+    // Where a cell is, relative to the root, in CSS px. Rows below the header scroll; row 0 does not.
+    const cellPoint = (col: number, row: number) => {
+      const rr = root!.getBoundingClientRect(), cr = canvasRef.current!.getBoundingClientRect();
+      const x = cr.left - rr.left + RHDR_W + COL_X[col] - s.scrollX + Math.min(COL_W[col] * 0.62, 70);
+      const y = cr.top - rr.top + HEAD_H + row * ROW_H - s.scrollY + ROW_H * 0.62;
+      return { x, y };
+    };
+    const closeEditor = () => {
+      s.cellEdit = null;
+      setCellEdit(null);
+      const ed = editorRef.current;
+      if (ed) { ed.classList.remove("open"); ed.style.visibility = ""; }
+    };
+    const stop = () => {
+      if (token.cancelled) return;
+      token.cancelled = true;
+      s.touched = true;
+      s.piloting = false;
+      s.pilotStop = null;
+      s.pilotWait?.();
+      if (s.cellEdit) { closeEditor(); setFormula(s.inspect && s.inspect.col === s.sel.col && s.inspect.row === s.sel.row ? s.inspect.input : ""); }
+      setNameText(null);
+      cursor.classList.remove("on");
+      redraw();
+    };
+    s.pilotStop = stop;
+
+    const sleep = (ms: number) => new Promise<void>((resolve, reject) => {
+      let left = ms, last = performance.now();
+      const tick = () => {
+        if (token.cancelled) return reject(new Cancelled());
+        const now = performance.now();
+        if (live()) left -= now - last; // the clock stops while off screen or hidden
+        last = now;
+        if (left <= 0) resolve(); else setTimeout(tick, Math.min(left, 100));
+      };
+      setTimeout(tick, Math.min(ms, 100));
+    });
+    const engineDone = () => new Promise<void>((resolve) => {
+      s.pilotWait = () => { s.pilotWait = null; resolve(); };
+    });
+
+    const api: PilotApi = {
+      moveTo: (target) => {
+        let p: { x: number; y: number };
+        if (target === "namebox") {
+          const rr = root!.getBoundingClientRect(), nb = nameRef.current!.getBoundingClientRect();
+          p = { x: nb.left - rr.left + nb.width * 0.62, y: nb.top - rr.top + nb.height * 0.6 };
+        } else {
+          // A target outside the view scrolls in first, so the cursor never leaves the grid.
+          const { col: c, row: r } = target, vw = s.w - RHDR_W, vh = viewH();
+          let x = s.scrollX, y = s.scrollY;
+          if (COL_X[c] < x) x = COL_X[c]; else if (COL_X[c] + COL_W[c] > x + vw) x = COL_X[c] + COL_W[c] - vw;
+          const top = (r - 1) * ROW_H;
+          if (r > 0) { if (top < y) y = top; else if (top + ROW_H > y + vh) y = top + ROW_H - vh; }
+          if (x !== s.scrollX || y !== s.scrollY) scrollTo(x, y);
+          p = cellPoint(c, r);
+        }
+        // Longer trips take longer, like a hand: 260 ms up close, 900 ms across the window.
+        const ms = Math.round(Math.min(900, 260 + Math.hypot(p.x - at.x, p.y - at.y) * 0.9));
+        place(p.x, p.y, ms);
+        at = p;
+        return ms;
+      },
+      press: () => {
+        cursor.classList.remove("press");
+        void cursor.offsetWidth; // restart the animation
+        cursor.classList.add("press");
+      },
+      select: (col, row) => {
+        select(col, row);
+        // The select may scroll the grid. Keep the cursor on the cell it clicked.
+        if (cursor.classList.contains("on")) { const p = cellPoint(col, row); if (p.x !== at.x || p.y !== at.y) { place(p.x, p.y, 0); at = p; } }
+      },
+      extend: (col, row) => extendTo(col, row),
+      type: (text) => {
+        if (text === null) { closeEditor(); return; }
+        if (!s.cellEdit) {
+          s.cellEdit = { ...s.sel };
+          s.editMode = "enter";
+          s.point = null;
+          setCellEdit(s.cellEdit);
+          editorRef.current?.classList.add("open");
+        }
+        setFormula(text);
+        redraw();
+      },
+      typeName: (text) => setNameText(text),
+      commit: async () => {
+        const ce = s.cellEdit;
+        if (!ce) return;
+        const done = engineDone();
+        workerRef.current?.postMessage({ type: "edit", col: ce.col, row: ce.row, text: s.editText });
+        closeEditor();
+        api.select(ce.col, ce.row + 1);
+        await done;
+      },
+      write: async (cells) => {
+        const done = engineDone();
+        workerRef.current?.postMessage({ type: "editRange", cells, at: { col: cells[0][0], row: cells[0][1] }, kind: "edit" });
+        await done;
+      },
+      read: (c, r) => {
+        const col = s.cols[c];
+        if (!col || col.t[r] !== 1) return textAt(c, r);
+        const f = s.cellFormats.get(c * s.rows + r) ?? s.formats[c];
+        return f === "percent" ? `${+(col.v[r] * 100).toPrecision(12)}%` : String(col.v[r]);
+      },
+      show: (on) => {
+        s.piloting = on || s.piloting;
+        cursor.classList.toggle("on", on);
+      },
+    };
+
+    // Start from the bottom-right of the grid, out of the way of the cells.
+    const rr0 = root!.getBoundingClientRect();
+    at = { x: rr0.width * 0.7, y: rr0.height * 0.8 };
+    place(at.x, at.y, 0);
+    s.piloting = true;
+    redraw();
+    runPilot(api, sleep).catch((e) => { console.warn("autopilot stopped:", e); stop(); });
+    return () => { token.cancelled = true; s.pilotStop = null; s.piloting = false; io.disconnect(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoplay, ready]);
 
@@ -1421,6 +1594,10 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
       onDragOver={(e) => { if (variant !== "app" || !e.dataTransfer.types.includes("Files")) return; e.preventDefault(); setDragOver(true); }}
       onDragLeave={(e) => { if (e.currentTarget === e.target || !e.currentTarget.contains(e.relatedTarget as Node)) setDragOver(false); }}
       onDrop={(e) => { if (variant !== "app") return; e.preventDefault(); setDragOver(false); openFile(e.dataTransfer.files?.[0]); }}
+      ref={rootRef}
+      onPointerDownCapture={() => s.pilotStop?.()}
+      onKeyDownCapture={() => s.pilotStop?.()}
+      onFocusCapture={() => s.pilotStop?.()}
       className={`app ${variant} theme-${theme.name}`}
       style={{
         "--bg": C.bg, "--chrome": C.headBg, "--line": C.line, "--text": C.text, "--muted": C.muted,
@@ -1585,6 +1762,7 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
         {dragOver && <div className="dropzone">Drop a CSV to open it. It stays on this machine.</div>}
         <div className="thumb v" ref={vThumbRef} onPointerDown={dragThumb("y")} />
         <div className="thumb h" ref={hThumbRef} onPointerDown={dragThumb("x")} />
+        {autoplay && <div className="pilotCaret" ref={caretRef} aria-hidden />}
         {!ready && (
           <div className="loading">
             {startError ? (
@@ -1650,6 +1828,15 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
           </div>
         )}
       </footer>
+
+      {autoplay && (
+        // The autopilot's cursor. Decoration: screen readers skip it, and clicks pass through it.
+        <div className="pilotCursor" ref={cursorRef} aria-hidden>
+          <svg width="22" height="26" viewBox="0 0 22 26">
+            <path d="M2 1.5v18.2l4.6-4.3 3.1 7.1 3.2-1.4-3.1-7h6.4z" fill="#1d1d1f" stroke="#fff" strokeWidth="1.6" strokeLinejoin="round" />
+          </svg>
+        </div>
+      )}
 
       {bench && (
         <div className="panel" role="dialog" aria-labelledby="bench-title">
