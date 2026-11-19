@@ -566,15 +566,18 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
     setError(null);
     s.editing = false;
     setFormula(s.inspect && s.inspect.col === col && s.inspect.row === row ? s.inspect.input : "");
-    // Keep the cell in view.
-    if (row > 0) {
+    // Keep the cell in view. Not before the grid has a size: with a 0x0 viewport the arithmetic
+    // below scrolls to nonsense (the hero once opened 156 px right and 78 px down).
+    if (s.w > 0 && s.h > 0 && row > 0) {
       const top = (row - 1) * ROW_H, vh = viewH();
       if (top < s.scrollY) scrollTo(s.scrollX, top);
       else if (top + ROW_H > s.scrollY + vh) scrollTo(s.scrollX, top + ROW_H - vh);
     }
     const left = COL_X[col], vw = s.w - RHDR_W;
-    if (left < s.scrollX) scrollTo(left, s.scrollY);
-    else if (left + COL_W[col] > s.scrollX + vw) scrollTo(left + COL_W[col] - vw, s.scrollY);
+    if (s.w > 0 && s.h > 0) {
+      if (left < s.scrollX) scrollTo(left, s.scrollY);
+      else if (left + COL_W[col] > s.scrollX + vw) scrollTo(left + COL_W[col] - vw, s.scrollY);
+    }
     workerRef.current?.postMessage({ type: "inspect", id: ++s.inspectId, col, row });
     redraw();
     // eslint-disable-next-line react-hooks/exhaustive-deps
