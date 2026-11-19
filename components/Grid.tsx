@@ -3,7 +3,7 @@
 // Engine harness for the spike. The grid is one canvas. Scrolling is our own (no 26M px spacer div),
 // the worker sends only the visible window, and numbers draw from a tabular glyph atlas.
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { ViewReply } from "@/engine/worker";
 import { formatNumber, type NumFormat } from "@/engine/format";
 import { lockAxis, newAxisState } from "./axis-lock";
@@ -153,7 +153,10 @@ type GridProps = {
 };
 
 const IS_MAC = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
-const MOD = IS_MAC ? "⌘" : "Ctrl+";
+// The server cannot know the platform. Render code reads it through useIsMac, which gives the
+// server's answer while hydrating and the real one right after, so the HTML never mismatches.
+const noSubscribe = () => () => {};
+const useIsMac = () => useSyncExternalStore(noSubscribe, () => IS_MAC, () => false);
 
 // F4, as in Excel: cycle the reference at the caret through A1 → $A$1 → A$1 → $A1 → A1.
 function cycleAnchor(text: string, caret: number): { text: string; caret: number } | null {
@@ -229,6 +232,8 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
   const inputRef = useRef<HTMLInputElement>(null);
   const editorRef = useRef<HTMLInputElement>(null);
   const rootRef = useRef<HTMLDivElement>(null);
+  const isMac = useIsMac();
+  const modKey = isMac ? "⌘" : "Ctrl+";
   const cursorRef = useRef<HTMLDivElement>(null);
   const caretRef = useRef<HTMLDivElement>(null);
   const workerRef = useRef<Worker | null>(null);
@@ -1744,9 +1749,9 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
                 onClick={openPicker}
                 disabled={!ready || !!loading}
                 title={!ready ? "Available when the engine is ready" : loading ? "A file is loading" : "Open a CSV file. It is read on this machine."}
-                aria-keyshortcuts={IS_MAC ? "Meta+O" : "Control+O"}
+                aria-keyshortcuts={isMac ? "Meta+O" : "Control+O"}
               >
-                Open CSV…<kbd>{MOD}O</kbd>
+                Open CSV…<kbd>{modKey}O</kbd>
               </button>
               <input
                 ref={fileRef}
@@ -1788,7 +1793,7 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
         tabIndex={0}
         role="application"
         aria-roledescription="spreadsheet"
-        aria-label={`${doc.kind === "csv" ? doc.name : title}. Arrow keys move, Return edits, ${MOD}/ lists shortcuts.`}
+        aria-label={`${doc.kind === "csv" ? doc.name : title}. Arrow keys move, Return edits, ${modKey}/ lists shortcuts.`}
         onFocus={() => { s.gridFocused = true; setGridFocused(true); redraw(); }}
         onBlur={() => { s.gridFocused = false; setGridFocused(false); redraw(); }}
         onKeyDown={(e) => { s.touched = true; if (e.target === wrapRef.current) onGridKey(e); }}
@@ -1899,8 +1904,8 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
             <button className="ctl" aria-pressed={toggles.heat} title="Flash the cells each edit recalculates" onClick={() => toggle("heat")}>Recalc heat</button>
             <button className="ctl" aria-pressed={toggles.arrows} title="Show what the selected formula reads" onClick={() => toggle("arrows")}>Arrows</button>
             {doc.kind === "ledger" && <button className="ctl" onClick={runBench} disabled={!ready || benchBusy}>{benchBusy ? "Running…" : "Benchmark"}</button>}
-            <button className="ctl" aria-expanded={keysOpen} aria-keyshortcuts={IS_MAC ? "Meta+/" : "Control+/"} onClick={() => setKeysOpen((v) => !v)}>
-              Shortcuts<kbd>{MOD}/</kbd>
+            <button className="ctl" aria-expanded={keysOpen} aria-keyshortcuts={isMac ? "Meta+/" : "Control+/"} onClick={() => setKeysOpen((v) => !v)}>
+              Shortcuts<kbd>{modKey}/</kbd>
             </button>
             <span className="num frame">draw {drawMs.toFixed(1)} ms</span>
           </div>
@@ -1948,7 +1953,7 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
                 ) : (
                   <tr key={i}>
                     <td>{row.label}</td>
-                    <td>{row.keys.map((k) => <kbd key={k}>{k.replace("MOD", IS_MAC ? "⌘" : "Ctrl")}</kbd>).reduce<React.ReactNode[]>((a, el, j) => (j ? [...a, " ", el] : [el]), [])}</td>
+                    <td>{row.keys.map((k) => <kbd key={k}>{k.replace("MOD", isMac ? "⌘" : "Ctrl")}</kbd>).reduce<React.ReactNode[]>((a, el, j) => (j ? [...a, " ", el] : [el]), [])}</td>
                   </tr>
                 ),
               )}
