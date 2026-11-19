@@ -1,0 +1,6 @@
+{
+  "name": "bench-hyperformula",
+  "private": true,
+  "description": "Dev-only baseline. HyperFormula is GPL-3.0; it is never imported by the app.",
+  "dependencies": { "hyperformula": "3.5.0" }
+}
