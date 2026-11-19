@@ -163,6 +163,7 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
     pointCell: null as { col: number; row: number } | null,
     pendingEdit: false, // a double-click before the cell's input arrived from the worker
     touched: false, // the visitor used the grid: autoplay stops
+    pageScrollAt: 0, wheelLast: 0, gridGesture: false, // embed wheel routing, per gesture
     inspectId: 0,
   }).current;
 
@@ -624,16 +625,33 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
   // Wheel and pointer input.
   useEffect(() => {
     const wrap = wrapRef.current!;
+    // Embeds decide per gesture (a run of wheel events less than 160 ms apart), like a map in a page:
+    // - the page was at rest for 200 ms when the gesture began: the grid under the pointer scrolls;
+    // - the page was still scrolling (or coasting): the page keeps the whole gesture, so a hero
+    //   never traps the wheel on the way down.
+    // At the top or bottom edge, a vertical gesture passes on to the page, like a nested scroll area.
+    // (Pointer-enter is not a usable signal: Chrome fires none when the page scrolls a grid under a
+    // still pointer.)
+    const onPageScroll = () => { s.pageScrollAt = performance.now(); };
+    window.addEventListener("scroll", onPageScroll, { passive: true });
     const onWheel = (e: WheelEvent) => {
-      // In an embed, the page scrolls until the visitor clicks into the grid. Otherwise a hero
-      // would trap the wheel on the way down the landing page.
-      if (variant === "embed" && !s.touched) return;
+      const now = performance.now();
+      if (variant === "embed") {
+        if (now - s.wheelLast > 160) s.gridGesture = s.touched || now - s.pageScrollAt > 200;
+        s.wheelLast = now;
+        if (!s.gridGesture) return;
+        const vertical = Math.abs(e.deltaY) > Math.abs(e.deltaX) && !e.shiftKey;
+        if (vertical && ((e.deltaY < 0 && s.scrollY <= 0) || (e.deltaY > 0 && s.scrollY >= maxY()))) return;
+      }
       e.preventDefault();
       const k = e.deltaMode === 1 ? ROW_H : e.deltaMode === 2 ? viewH() : 1;
       scrollTo(s.scrollX + (e.shiftKey ? e.deltaY : e.deltaX) * k, s.scrollY + (e.shiftKey ? 0 : e.deltaY) * k);
     };
     wrap.addEventListener("wheel", onWheel, { passive: false });
-    return () => wrap.removeEventListener("wheel", onWheel);
+    return () => {
+      wrap.removeEventListener("wheel", onWheel);
+      window.removeEventListener("scroll", onPageScroll);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
