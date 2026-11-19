@@ -30,6 +30,7 @@ function setColumns(widths: number[]) {
 setColumns(LEDGER_W);
 const OVERSCAN = 48;
 const FADE_MS = 1100;
+const LAND_MS = 1400; // the outline on the cell an edit just wrote
 
 // Themes. The canvas reads C; the bars read the same values as CSS variables.
 export type GridTheme = {
@@ -250,6 +251,7 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
     gridFocused: false, // the selection draws in the accent only while the grid has focus
     corner: { col: 0, row: 1 }, // the moving end of the range; the active cell (sel) stays put, like Excel
     copied: null as { c0: number; r0: number; c1: number; r1: number } | null, // dashed outline after a copy
+    landed: null as { col: number; row: number; at: number } | null, // the cell an edit just wrote: a fading outline
     clipText: "", // what we last put on the clipboard: a paste of exactly this is our own copy
     statsTimer: 0 as unknown as ReturnType<typeof setTimeout>,
     pageScrollAt: 0, wheelLast: 0, gridGesture: false, // embed wheel routing, per gesture
@@ -579,6 +581,23 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
         ctx.setLineDash([]);
       }
     }
+    // The cell an edit just wrote keeps a fading outline, so the eye can follow it after Return moves down.
+    let landA = 0;
+    if (s.landed) {
+      landA = Math.max(0, 1 - (performance.now() - s.landed.at) / LAND_MS);
+      const L = s.landed;
+      if (landA <= 0) s.landed = null;
+      else if (visible(L.row) && !(L.col === s.sel.col && L.row === s.sel.row)) {
+        const lr = rectOf(L.col, L.row);
+        ctx.fillStyle = tint(+(0.1 * landA).toFixed(3));
+        ctx.fillRect(lr.x, lr.y, lr.w, lr.h);
+        ctx.strokeStyle = C.accent;
+        ctx.globalAlpha = landA;
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(lr.x + 1, lr.y + 1, lr.w - 2, lr.h - 2);
+        ctx.globalAlpha = 1;
+      }
+    }
     if (visible(s.sel.row)) {
       ctx.strokeStyle = s.gridFocused || s.cellEdit ? C.accent : C.muted;
       ctx.lineWidth = 2;
@@ -660,7 +679,7 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
     }
 
     s.drawMs = s.drawMs * 0.9 + (performance.now() - t0) * 0.1;
-    if (heatA > 0) s.raf = requestAnimationFrame(draw);
+    if (heatA > 0 || landA > 0) s.raf = requestAnimationFrame(draw);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -831,6 +850,7 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
           s.editAt = performance.now();
           setLastEdit({ ...m, name: cellName(m.col, m.row) });
           if (m.kind === "paste" || m.kind === "clear") s.copied = null;
+          if (m.kind === "edit") s.landed = { col: m.col, row: m.row, at: performance.now() };
           // An undo or redo shows the cell it changed, like Numbers and Excel.
           if (m.kind === "undo" || m.kind === "redo") select(m.col, m.row);
           s.body = s.body && { ...s.body, epoch: -1 };
