@@ -42,7 +42,7 @@ const SF = '-apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-se
 export const THEMES: Record<"numbers" | "ink", GridTheme> = {
   numbers: {
     name: "numbers", bg: "#ffffff", line: "#ebebed", headBg: "#f9f9fa", headText: "#8a8a8e", headSel: "#1d1d1f",
-    text: "#1d1d1f", muted: "#8a8a8e", accent: "#0a6cff", accentRgb: "10,108,255", onAccent: "#ffffff",
+    text: "#1d1d1f", muted: "#6e6e73", accent: "#0a6cff", accentRgb: "10,108,255", onAccent: "#ffffff",
     error: "#d70015", frozenLine: "#d2d2d7", skeleton: "#f2f2f4", font: SF, mono: 'ui-monospace, "SF Mono", Menlo, monospace',
   },
   ink: {
@@ -149,6 +149,35 @@ type GridProps = {
   home?: { href: string; label: string };
 };
 
+const IS_MAC = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+const MOD = IS_MAC ? "⌘" : "Ctrl+";
+
+// F4, as in Excel: cycle the reference at the caret through A1 → $A$1 → A$1 → $A1 → A1.
+function cycleAnchor(text: string, caret: number): { text: string; caret: number } | null {
+  const re = /\$?[A-Za-z]{1,3}\$?\d+/g;
+  for (let m; (m = re.exec(text)); ) {
+    const a = m.index, b = a + m[0].length;
+    if (caret < a || caret > b) continue;
+    if (a > 0 && /[A-Za-z0-9_]/.test(text[a - 1])) continue; // part of a function name
+    const p = /^(\$?)([A-Za-z]{1,3})(\$?)(\d+)$/.exec(m[0])!;
+    const states = [[false, false], [true, true], [false, true], [true, false]];
+    const i = states.findIndex(([c, r]) => c === (p[1] === "$") && r === (p[3] === "$"));
+    const [c, r] = states[(i + 1) % 4];
+    const ref = `${c ? "$" : ""}${p[2].toUpperCase()}${r ? "$" : ""}${p[4]}`;
+    return { text: text.slice(0, a) + ref + text.slice(b), caret: a + ref.length };
+  }
+  return null;
+}
+
+// "K5", "$K$5", "k5", or the first cell of "K5:M9" → { col, row } (zero-based), or null.
+function parseCellRef(t: string): { col: number; row: number } | null {
+  const m = /^\s*\$?([A-Za-z]{1,3})\$?(\d+)(?::.*)?\s*$/.exec(t);
+  if (!m) return null;
+  const col = m[1].toUpperCase().split("").reduce((n, ch) => n * 26 + ch.charCodeAt(0) - 64, 0) - 1;
+  const row = parseInt(m[2], 10) - 1;
+  return row >= 0 ? { col, row } : null;
+}
+
 export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant = "app", autoplay = false, title = "Sales ledger", home }: GridProps) {
   applyTheme(theme);
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -179,6 +208,7 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
     pointCell: null as { col: number; row: number } | null,
     pendingEdit: false, // a double-click before the cell's input arrived from the worker
     touched: false, // the visitor used the grid: autoplay stops
+    gridFocused: false, // the selection draws in the accent only while the grid has focus
     pageScrollAt: 0, wheelLast: 0, gridGesture: false, // embed wheel routing, per gesture
     axis: newAxisState(), // the soft axis lock for wheel scrolling
     // Shared memory: engine columns read directly, no view messages.
@@ -198,6 +228,13 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
   const [doc, setDoc] = useState<{ kind: "ledger" } | { kind: "csv"; name: string; dataRows: number; dataCols: number; bytes: number; parseMs: number }>({ kind: "ledger" });
   const [loading, setLoading] = useState<{ name: string; pct: number; rows: number } | null>(null);
   const [dragOver, setDragOver] = useState(false);
+  const [keysOpen, setKeysOpen] = useState(false);
+  const [nameText, setNameText] = useState<string | null>(null); // non-null while the name box is being typed in
+  const [announce, setAnnounce] = useState("");
+  const [gridFocused, setGridFocused] = useState(false);
+  const nameRef = useRef<HTMLInputElement>(null);
+  const benchCloseRef = useRef<HTMLButtonElement>(null);
+  const keysCloseRef = useRef<HTMLButtonElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const [formula, setFormulaState] = useState("");
   const [cellEdit, setCellEdit] = useState<{ col: number; row: number } | null>(null);
@@ -467,7 +504,7 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
       }
     }
     if (visible(s.sel.row)) {
-      ctx.strokeStyle = C.accent;
+      ctx.strokeStyle = s.gridFocused || s.cellEdit ? C.accent : C.muted;
       ctx.lineWidth = 2;
       ctx.strokeRect(sr.x + 1, sr.y + 1, sr.w - 2, sr.h - 2);
     }
@@ -602,6 +639,7 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
           s.cellFormats = new Map(m.cellFormats);
           break;
         case "ready":
+          if (variant === "app") requestAnimationFrame(() => wrapRef.current?.focus({ preventScroll: true }));
           s.shared = !!m.shared;
           setColumns(m.widths ?? LEDGER_W);
           setDoc(m.kind === "csv" ? { kind: "csv", name: m.name, dataRows: m.dataRows, dataCols: m.dataCols, bytes: m.bytes, parseMs: m.parseMs } : { kind: "ledger" });
@@ -664,6 +702,7 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
           if (m.id === s.inspectId && m.col === s.sel.col && m.row === s.sel.row) {
             s.inspect = m;
             setInspect(m);
+            setAnnounce(`${cellName(m.col, m.row)}, ${m.display || "empty"}${m.input.startsWith("=") ? `, formula ${m.input}` : ""}`);
             if (!s.editing) setFormula(m.input);
             if (s.pendingEdit) { s.pendingEdit = false; startEdit(m.input, "edit"); }
             redraw();
@@ -854,6 +893,10 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
       }
       // A click elsewhere saves the edit, like Excel.
       endEdit(true);
+    } else if (s.editing && document.activeElement === inputRef.current) {
+      // Text typed in the formula bar is saved before the selection moves, not thrown away.
+      workerRef.current?.postMessage({ type: "edit", col: s.sel.col, row: s.sel.row, text: s.editText });
+      s.editing = false;
     }
     select(cell.col, cell.row);
     wrapRef.current!.focus();
@@ -870,10 +913,12 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
 
   const onEditorKey = (e: React.KeyboardEvent<HTMLInputElement>) => {
     const k = e.key;
-    if (k === "Enter") { e.preventDefault(); endEdit(true, 0, e.shiftKey ? -1 : 1); return; }
+    if (k === "Enter" && !(e.metaKey || e.ctrlKey)) { e.preventDefault(); endEdit(true, 0, e.shiftKey ? -1 : 1); return; }
     if (k === "Tab") { e.preventDefault(); endEdit(true, e.shiftKey ? -1 : 1, 0); return; }
     if (k === "Escape") { e.preventDefault(); endEdit(false); return; }
     if (k === "F2") { e.preventDefault(); s.editMode = s.editMode === "edit" ? "enter" : "edit"; return; }
+    if (k === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); endEdit(true); return; }
+    if (k === "F4") { e.preventDefault(); anchorAtCaret(e.currentTarget); return; }
     const dir: Record<string, [number, number]> = { ArrowUp: [0, -1], ArrowDown: [0, 1], ArrowLeft: [-1, 0], ArrowRight: [1, 0] };
     const d = dir[k];
     if (!d) return;
@@ -919,13 +964,17 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
   const onGridKey = (e: React.KeyboardEvent) => {
     const { col, row } = s.sel;
     const page = Math.floor(viewH() / ROW_H);
-    const jump = e.metaKey || e.ctrlKey;
+    const altGr = e.ctrlKey && e.altKey && !e.metaKey; // Windows AltGr types @, €, {
+    const jump = (e.metaKey || e.ctrlKey) && !altGr;
     const go: Record<string, [number, number]> = {
+      Home: jump ? [0, 0] : [0, row], End: jump ? [COL_W.length - 1, s.rows - 1] : [COL_W.length - 1, row],
       ArrowUp: [col, jump ? 0 : row - 1], ArrowDown: [col, jump ? s.rows - 1 : row + 1],
       ArrowLeft: [jump ? 0 : col - 1, row], ArrowRight: [jump ? COL_W.length - 1 : col + 1, row],
       PageUp: [col, row - page], PageDown: [col, row + page], Tab: [col + (e.shiftKey ? -1 : 1), row],
     };
     if (go[e.key]) { e.preventDefault(); select(...go[e.key]); return; }
+    if (e.key === "Enter" && e.shiftKey) { e.preventDefault(); select(col, row - 1); return; } // like Excel
+    if (!IS_MAC && e.ctrlKey && e.key.toLowerCase() === "y") { e.preventDefault(); workerRef.current?.postMessage({ type: "redo" }); return; }
     if (jump && e.key.toLowerCase() === "z") {
       e.preventDefault();
       workerRef.current?.postMessage({ type: e.shiftKey ? "redo" : "undo" });
@@ -950,12 +999,90 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
       editorRef.current?.focus();
       return;
     }
-    if (e.key.length === 1 && !jump && !e.altKey) {
+    if (e.key.length === 1 && !jump && (!e.altKey || altGr)) {
       // Typing replaces the cell, like Excel. The editor opens with that first character.
       e.preventDefault();
       startEdit(e.key, "enter");
     }
   };
+
+  // F4 in either editor.
+  const anchorAtCaret = (el: HTMLInputElement) => {
+    const r = cycleAnchor(el.value, el.selectionStart ?? el.value.length);
+    if (!r) return;
+    s.editing = true;
+    s.point = null;
+    setFormula(r.text);
+    el.value = r.text;
+    el.setSelectionRange(r.caret, r.caret);
+    redraw();
+  };
+
+  // The name box: type a cell and press Return to go there, like Excel's Name Box.
+  const goToCell = (text: string) => {
+    const c = parseCellRef(text);
+    if (!c || c.col >= COL_W.length || c.row >= s.rows) {
+      setError(`"${text.trim()}" is not a cell in this sheet. Try something like K5 or A1000000.`);
+      return false;
+    }
+    setNameText(null);
+    select(c.col, c.row);
+    wrapRef.current?.focus({ preventScroll: true });
+    return true;
+  };
+  const focusNameBox = () => {
+    if (s.cellEdit) endEdit(true);
+    const el = nameRef.current;
+    if (!el) return;
+    setNameText(cellName(s.sel.col, s.sel.row));
+    el.focus();
+    requestAnimationFrame(() => el.select());
+  };
+
+  // The formula bar: the same keys as the in-cell editor.
+  const onFormulaKey = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    const k = e.key;
+    if (k === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); commit(0); return; }
+    if (k === "Enter") { e.preventDefault(); commit(e.shiftKey ? -1 : 1); return; }
+    if (k === "Tab") {
+      e.preventDefault();
+      if (s.cellEdit) { endEdit(true, e.shiftKey ? -1 : 1, 0); return; }
+      commit(0);
+      select(s.sel.col + (e.shiftKey ? -1 : 1), s.sel.row);
+      return;
+    }
+    if (k === "F4") { e.preventDefault(); anchorAtCaret(e.currentTarget); return; }
+    if (k === "Escape") {
+      e.preventDefault();
+      if (s.cellEdit) { endEdit(false); return; } // also close the cell editor the bar was continuing
+      s.editing = false;
+      setFormula(selInfo?.input ?? "");
+      setError(null);
+      wrapRef.current?.focus();
+    }
+  };
+
+  const openPicker = () => { if (ready && !loading) fileRef.current?.click(); };
+
+  // Shortcuts that work anywhere on the page (the app variant only).
+  useEffect(() => {
+    if (variant !== "app") return;
+    const onKey = (e: KeyboardEvent) => {
+      const mod = IS_MAC ? e.metaKey : e.ctrlKey;
+      const k = e.key.toLowerCase();
+      if (mod && k === "o") { e.preventDefault(); openPicker(); return; }
+      if (mod && (k === "/" || e.code === "Slash")) { e.preventDefault(); setKeysOpen((v) => !v); return; }
+      if (e.ctrlKey && !e.metaKey && k === "g") { e.preventDefault(); focusNameBox(); return; }
+      if (k === "escape") { setKeysOpen(false); setBench(null); }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [variant, ready, loading]);
+
+  // An opened panel takes focus on its Close button, so Esc and Tab start there.
+  useEffect(() => { if (keysOpen) keysCloseRef.current?.focus(); }, [keysOpen]);
+  useEffect(() => { if (bench) benchCloseRef.current?.focus(); }, [bench]);
 
   const toggle = (k: "heat" | "arrows") => {
     const next = { ...toggles, [k]: !toggles[k] };
@@ -966,7 +1093,7 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
   };
 
   // Guided demo: one click per idea, so a visitor sees the engine work without knowing what to type.
-  const [guide, setGuide] = useState("Every number here is live. Double-click a cell to edit it, or just start typing. In a formula, click cells to add them. Or try one:");
+  const [guide, setGuide] = useState("Every number here is live. Double-click a cell to edit it, or try one:");
   const taxStep = useRef(0);
   const TRY = [
     {
@@ -1059,41 +1186,84 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
       } as React.CSSProperties}
     >
       <header className="bar">
-        {home && variant === "app" && <a className="home" href={home.href}>{home.label}</a>}
-        <div className="title">
-          <span className="name">{doc.kind === "csv" ? doc.name : title}</span>
-          <span className="meta">
-            {doc.kind === "csv"
-              ? `${fmtInt(doc.dataRows)} rows · ${fmtInt(doc.dataCols)} columns · ${(doc.bytes / 1048576).toFixed(1)} MB`
-              : ready ? `${fmtInt(orders)} orders · ${fmtInt(ready.formulas)} formulas` : "Loading"}
-          </span>
+        {/* Left: where you are. One line, one strong label. */}
+        <div className="barStart">
+          {home && variant === "app" && (
+            <>
+              <a className="home" href={home.href}>{home.label}</a>
+              <span className="sep" aria-hidden />
+            </>
+          )}
+          <div className="title" title={doc.kind === "csv" ? `${doc.name}: ${fmtInt(doc.dataRows)} rows, ${fmtInt(doc.dataCols)} columns` : `${title}: ${fmtInt(orders)} orders, ${ready ? fmtInt(ready.formulas) : "…"} formulas`}>
+            <span className="name">{doc.kind === "csv" ? doc.name : title}</span>
+            <span className="meta">
+              {doc.kind === "csv"
+                ? `${fmtInt(doc.dataRows)} rows · ${fmtInt(doc.dataCols)} columns · ${(doc.bytes / 1048576).toFixed(1)} MB`
+                : ready ? `${fmtInt(ready.formulas)} live formulas` : "Loading"}
+            </span>
+          </div>
         </div>
-        {variant === "app" && (
-          <>
-            <button className="open" onClick={() => fileRef.current?.click()} disabled={!ready || !!loading}>Open CSV…</button>
-            <input
-              ref={fileRef}
-              type="file"
-              accept=".csv,.tsv,.txt,text/csv,text/tab-separated-values"
-              hidden
-              onChange={(e) => { openFile(e.target.files?.[0]); e.target.value = ""; }}
-            />
-          </>
-        )}
+
+        {/* Centre: the formula bar, on the true centre of the window. */}
         <div className="formula">
-          <span className="namebox">{cellName(sel.col, sel.row)}</span>
-          <span className="fx">ƒ</span>
+          <input
+            ref={nameRef}
+            className="namebox"
+            value={nameText ?? cellName(sel.col, sel.row)}
+            spellCheck={false}
+            autoComplete="off"
+            aria-label="Cell reference. Type a cell, like K5, and press Return to go there."
+            title={`Go to a cell (⌃G)`}
+            onFocus={(e) => { setNameText(e.currentTarget.value); requestAnimationFrame(() => e.currentTarget?.select()); }}
+            onChange={(e) => setNameText(e.target.value)}
+            onBlur={() => setNameText(null)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") { e.preventDefault(); goToCell(e.currentTarget.value); }
+              if (e.key === "Escape") { e.preventDefault(); setNameText(null); setError(null); wrapRef.current?.focus(); }
+            }}
+          />
+          <span className="fx" aria-hidden>
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M7.4 3.3c-.8-.5-2-.2-2.3.9L3.5 12c-.3 1.1-1.4 1.4-2.2.9" />
+              <path d="M3.2 6.6h3.9" />
+              <path d="M9.4 7l4 5M13.4 7l-4 5" />
+            </svg>
+          </span>
           <input
             ref={inputRef}
+            className="formulaInput"
             value={formula}
             spellCheck={false}
+            autoComplete="off"
+            aria-label={`Contents of ${cellName(sel.col, sel.row)}`}
             onChange={(e) => { s.editing = true; setFormula(e.target.value); }}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") { e.preventDefault(); commit(e.shiftKey ? -1 : 1); }
-              if (e.key === "Escape") { s.editing = false; setFormula(selInfo?.input ?? ""); setError(null); wrapRef.current?.focus(); }
-            }}
-            placeholder="Type a value or a formula, then press Return"
+            onKeyDown={onFormulaKey}
+            placeholder="Type a value or a formula"
           />
+        </div>
+
+        {/* Right: the one document command. */}
+        <div className="barEnd">
+          {variant === "app" && (
+            <>
+              <button
+                className="ctl open"
+                onClick={openPicker}
+                disabled={!ready || !!loading}
+                title={!ready ? "Available when the engine is ready" : loading ? "A file is loading" : "Open a CSV file. It is read on this machine."}
+                aria-keyshortcuts={IS_MAC ? "Meta+O" : "Control+O"}
+              >
+                Open CSV…<kbd>{MOD}O</kbd>
+              </button>
+              <input
+                ref={fileRef}
+                type="file"
+                accept=".csv,.tsv,.txt,text/csv,text/tab-separated-values"
+                hidden
+                onChange={(e) => { openFile(e.target.files?.[0]); e.target.value = ""; }}
+              />
+            </>
+          )}
         </div>
       </header>
 
@@ -1102,7 +1272,7 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
           <span className="guide">{guide}</span>
           <div className="actions">
             {TRY.map((t) => (
-              <button key={t.label} onClick={t.run} disabled={!ready}>{t.label}</button>
+              <button key={t.label} className="ctl" onClick={t.run} disabled={!ready}>{t.label}</button>
             ))}
           </div>
         </div>
@@ -1114,7 +1284,7 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
             empty column, like <code>=SUM(B:B)</code>.
           </span>
           <div className="actions">
-            <button onClick={() => location.reload()}>Back to the ledger demo</button>
+            <button className="ctl" onClick={() => location.reload()}>Back to the ledger demo</button>
           </div>
         </div>
       )}
@@ -1123,6 +1293,11 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
         className="gridwrap"
         ref={wrapRef}
         tabIndex={0}
+        role="application"
+        aria-roledescription="spreadsheet"
+        aria-label={`${doc.kind === "csv" ? doc.name : title}. Arrow keys move, Return edits, ${MOD}/ lists shortcuts.`}
+        onFocus={() => { s.gridFocused = true; setGridFocused(true); redraw(); }}
+        onBlur={() => { s.gridFocused = false; setGridFocused(false); redraw(); }}
         onKeyDown={(e) => { s.touched = true; if (e.target === wrapRef.current) onGridKey(e); }}
         onPointerDown={(e) => { s.touched = true; onPointerDown(e); }}
         onDoubleClick={onDoubleClick}
@@ -1160,6 +1335,7 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
             </div>
           </div>
         )}
+        <div className="sr-only" aria-live="polite">{gridFocused ? announce : ""}</div>
         {dragOver && <div className="dropzone">Drop a CSV to open it. It stays on this machine.</div>}
         <div className="thumb v" ref={vThumbRef} onPointerDown={dragThumb("y")} />
         <div className="thumb h" ref={hThumbRef} onPointerDown={dragThumb("x")} />
@@ -1177,11 +1353,11 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
       </div>
 
       <footer className="status">
-        <div className="recalc">
+        <div className="recalc" role="status" aria-live="polite">
           {recalcing ? (
             <>Recalculating after <b>{recalcing}</b>… the grid stays live</>
           ) : error ? (
-            <span className="err">{error}</span>
+            <span className="err" role="alert">{error}</span>
           ) : lastEdit ? (
             <>
               {lastEdit.kind === "undo" ? "Undo: " : lastEdit.kind === "redo" ? "Redo: " : ""}<b>{lastEdit.name}</b> changed · <b className="num">{fmtInt(lastEdit.recomputed)}</b> {lastEdit.recomputed === 1 ? "cell" : "cells"} recomputed in{" "}
@@ -1209,19 +1385,22 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
         </div>
         {variant === "app" && (
           <div className="right">
-            <button className={toggles.heat ? "on" : ""} onClick={() => toggle("heat")}>Recalc heat</button>
-            <button className={toggles.arrows ? "on" : ""} onClick={() => toggle("arrows")}>Arrows</button>
-            {doc.kind === "ledger" && <button onClick={runBench} disabled={!ready || benchBusy}>{benchBusy ? "Running…" : "Benchmark"}</button>}
+            <button className="ctl" aria-pressed={toggles.heat} title="Flash the cells each edit recalculates" onClick={() => toggle("heat")}>Recalc heat</button>
+            <button className="ctl" aria-pressed={toggles.arrows} title="Show what the selected formula reads" onClick={() => toggle("arrows")}>Arrows</button>
+            {doc.kind === "ledger" && <button className="ctl" onClick={runBench} disabled={!ready || benchBusy}>{benchBusy ? "Running…" : "Benchmark"}</button>}
+            <button className="ctl" aria-expanded={keysOpen} aria-keyshortcuts={IS_MAC ? "Meta+/" : "Control+/"} onClick={() => setKeysOpen((v) => !v)}>
+              Shortcuts<kbd>{MOD}/</kbd>
+            </button>
             <span className="num frame">draw {drawMs.toFixed(1)} ms</span>
           </div>
         )}
       </footer>
 
       {bench && (
-        <div className="bench" role="dialog">
-          <div className="benchhead">
-            <span>Benchmark · this browser</span>
-            <button onClick={() => setBench(null)} aria-label="Close">Close</button>
+        <div className="panel" role="dialog" aria-labelledby="bench-title">
+          <div className="panelhead">
+            <span id="bench-title">Benchmark · this browser</span>
+            <button ref={benchCloseRef} className="ctl" onClick={() => setBench(null)}>Close</button>
           </div>
           <table>
             <thead><tr><th>Edit</th><th>Recomputed</th><th>Median</th><th>Best</th></tr></thead>
@@ -1234,9 +1413,54 @@ export default function Grid({ theme = THEMES.numbers, orders = ORDERS, variant 
           </table>
         </div>
       )}
+
+      {keysOpen && (
+        <div className="panel keys" role="dialog" aria-labelledby="keys-title">
+          <div className="panelhead">
+            <span id="keys-title">Keyboard shortcuts</span>
+            <button ref={keysCloseRef} className="ctl" onClick={() => setKeysOpen(false)}>Close<kbd>esc</kbd></button>
+          </div>
+          <table>
+            <tbody>
+              {SHORTCUTS.map((row, i) =>
+                "group" in row ? (
+                  <tr key={i} className="group"><td colSpan={2}>{row.group}</td></tr>
+                ) : (
+                  <tr key={i}>
+                    <td>{row.label}</td>
+                    <td>{row.keys.map((k) => <kbd key={k}>{k.replace("MOD", IS_MAC ? "⌘" : "Ctrl")}</kbd>).reduce<React.ReactNode[]>((a, el, j) => (j ? [...a, " ", el] : [el]), [])}</td>
+                  </tr>
+                ),
+              )}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }
+
+const SHORTCUTS: ({ group: string } | { label: string; keys: string[] })[] = [
+  { group: "Move" },
+  { label: "Move one cell", keys: ["←", "→", "↑", "↓"] },
+  { label: "Next cell / previous cell", keys: ["Tab", "⇧ Tab"] },
+  { label: "Start or end of the row", keys: ["Home", "End"] },
+  { label: "Edge of the sheet", keys: ["MOD ↑ ↓ ← →"] },
+  { label: "First cell / last cell", keys: ["MOD Home", "MOD End"] },
+  { label: "Go to a cell", keys: ["⌃ G"] },
+  { group: "Edit" },
+  { label: "Edit the cell", keys: ["Return", "F2"] },
+  { label: "Replace the cell", keys: ["Type"] },
+  { label: "Save and move down / up", keys: ["Return", "⇧ Return"] },
+  { label: "Save and stay", keys: ["MOD Return"] },
+  { label: "Cancel the edit", keys: ["esc"] },
+  { label: "Absolute reference ($A$1)", keys: ["F4"] },
+  { label: "Clear the cell", keys: ["⌫"] },
+  { label: "Undo / redo", keys: ["MOD Z", "⇧ MOD Z"] },
+  { group: "File" },
+  { label: "Open a CSV", keys: ["MOD O"] },
+  { label: "This list", keys: ["MOD /"] },
+];
 
 function arrow(ctx: CanvasRenderingContext2D, x0: number, y0: number, x1: number, y1: number) {
   const dx = x1 - x0, dy = y1 - y0;

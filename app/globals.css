@@ -3,83 +3,152 @@
   --chrome: #f9f9fa;
   --line: #e5e5ea;
   --text: #1d1d1f;
-  --muted: #8a8a8e;
+  --muted: #6e6e73; /* 5.1:1 on white, 4.8:1 on --chrome: passes AA at 12-13 px */
   --accent: #0a6cff;
+  --accent-rgb: 10, 108, 255;
   --error: #d70015;
   --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
   --mono: ui-monospace, "SF Mono", Menlo, monospace;
+  /* One curve and two durations for the whole app. */
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --press: 160ms;
+  --fade: 150ms;
+  /* Two control sizes: header controls and everything else. */
+  --control: 32px;
+  --control-sm: 28px;
+  --radius: 8px;
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 13px/1.4 var(--font); -webkit-font-smoothing: antialiased; }
 button { font: inherit; }
 .num { font-variant-numeric: tabular-nums; }
+::selection { background: rgba(var(--accent-rgb), 0.18); }
+input { caret-color: var(--accent); }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 
-.app { display: grid; grid-template-rows: auto auto 1fr auto; height: 100dvh; background: var(--bg); color: var(--text); font-family: var(--font); }
+/* One focus ring for every control that does not draw its own. */
+:where(button, a, [role="button"]):focus-visible { outline: none; box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.28); }
+
+/* Shared control look: header controls are 32 px, strip and footer controls 28 px. All 8 px radius. */
+.ctl {
+  display: inline-flex; align-items: center; gap: 8px; height: var(--control-sm); padding: 0 11px;
+  border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg); color: var(--text);
+  font: inherit; cursor: pointer; white-space: nowrap;
+  transition: transform var(--press) var(--ease-out), background-color var(--fade) var(--ease-out), border-color var(--fade) var(--ease-out), color var(--fade) var(--ease-out);
+}
+.ctl:active:not(:disabled) { transform: scale(0.97); }
+.ctl:disabled { opacity: 0.4; cursor: default; }
+@media (hover: hover) and (pointer: fine) {
+  .ctl:hover:not(:disabled) { background: var(--chrome); border-color: color-mix(in srgb, var(--text) 18%, transparent); }
+}
+kbd { font: 500 11px var(--font); color: var(--muted); letter-spacing: 0.02em; }
+
+.app { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto 1fr auto; height: 100dvh; background: var(--bg); color: var(--text); font-family: var(--font); }
 .app.embed { grid-template-rows: auto 1fr auto; height: 100%; }
-.app.embed .bar .title { display: none; }
 
-.bar { display: flex; align-items: center; gap: 20px; padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--bg); }
-.title { display: flex; flex-direction: column; min-width: 180px; }
-.title .name { font-weight: 600; letter-spacing: -0.01em; }
-.title .meta { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
-.formula { flex: 1; display: flex; align-items: center; height: 32px; border: 1px solid var(--line); border-radius: 8px; background: var(--chrome); overflow: hidden; }
-.formula:focus-within { border-color: var(--accent); background: var(--bg); box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.12); }
-.namebox { width: 76px; padding: 0 10px; font: 500 12px var(--mono); color: var(--text); border-right: 1px solid var(--line); height: 100%; display: flex; align-items: center; }
-.fx { padding: 0 8px 0 10px; color: var(--muted); font-style: italic; }
-.formula input { flex: 1; height: 100%; border: 0; outline: 0; background: transparent; font: 13px var(--mono); color: var(--text); padding-right: 10px; }
-.formula input::placeholder { color: var(--muted); font-family: var(--font); }
+/* ---------- Header: three columns, the formula bar on the true centre ---------- */
+.bar {
+  display: grid; grid-template-columns: minmax(0, 1fr) minmax(360px, 640px) minmax(0, 1fr); align-items: center; column-gap: 16px;
+  height: 48px; padding: 0 16px; border-bottom: 1px solid var(--line); background: var(--bg);
+}
+.barStart { display: flex; align-items: center; min-width: 0; }
+.barEnd { display: flex; align-items: center; justify-content: flex-end; gap: 8px; min-width: 0; }
+.app.embed .barStart { visibility: hidden; }
 
+.bar .home { flex: none; font-weight: 500; color: var(--muted); text-decoration: none; border-radius: 4px; transition: color var(--fade) var(--ease-out); }
+@media (hover: hover) and (pointer: fine) { .bar .home:hover { color: var(--text); } }
+.bar .sep { flex: none; width: 1px; height: 16px; margin: 0 12px; background: var(--line); }
+/* Name and meta on one baseline. The meta line gives way first when space runs out. */
+.title { display: flex; align-items: baseline; gap: 8px; min-width: 0; white-space: nowrap; }
+.title .name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-weight: 600; letter-spacing: -0.01em; }
+.title .meta { flex: 0 1000 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+
+.formula {
+  grid-column: 2; display: flex; align-items: center; height: var(--control); min-width: 0;
+  border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg); overflow: hidden;
+  transition: border-color var(--fade) var(--ease-out), box-shadow var(--fade) var(--ease-out);
+}
+.formula:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.15); }
+.formula input { height: 100%; border: 0; outline: 0; background: transparent; color: var(--text); font: 13px var(--font); font-variant-numeric: tabular-nums; }
+.formula input:focus-visible { box-shadow: none; }
+/* The name box: a real input, like Excel's. Type K5 and press Return to go there. */
+.formula .namebox {
+  flex: none; width: 88px; padding: 0 8px; text-align: center; font-weight: 500; border-right: 1px solid var(--line);
+  transition: background-color var(--fade) var(--ease-out);
+}
+.formula .namebox:focus { background: rgba(var(--accent-rgb), 0.06); }
+.fx { flex: none; display: flex; align-items: center; padding: 0 8px 0 10px; color: var(--muted); }
+.formula .formulaInput { flex: 1; min-width: 0; padding-right: 10px; }
+.formula .formulaInput::placeholder { color: var(--muted); }
+
+.bar .open { height: var(--control); padding: 0 10px 0 12px; font-weight: 500; }
+
+@media (max-width: 860px) {
+  .bar { grid-template-columns: auto minmax(0, 1fr) auto; }
+  .title .meta, .bar .open kbd { display: none; }
+}
+@media (max-width: 640px) {
+  /* The formula bar moves to its own full-width row. */
+  .bar { grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: 44px auto; height: auto; padding-bottom: 8px; }
+  .formula { grid-column: 1 / -1; grid-row: 2; }
+}
+
+/* ---------- Try strip ---------- */
+.try { display: flex; align-items: center; justify-content: space-between; gap: 16px; height: 44px; padding: 0 16px; border-bottom: 1px solid var(--line); background: var(--bg); }
+.try .guide { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+.try .actions { display: flex; gap: 6px; flex-shrink: 0; }
+.try code { font: 12px var(--mono); background: var(--chrome); border: 1px solid var(--line); border-radius: 5px; padding: 1px 5px; }
+@media (max-width: 1100px) {
+  /* The actions scroll sideways instead of wrapping, so the strip keeps its height. */
+  .try .actions { flex-shrink: 1; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+  .try .guide { display: none; }
+}
+
+/* ---------- Grid ---------- */
 .gridwrap { position: relative; overflow: hidden; outline: none; touch-action: none; cursor: cell; }
 .gridwrap canvas { position: absolute; inset: 0; display: block; }
-.thumb { position: absolute; border-radius: 99px; background: color-mix(in srgb, var(--text) 22%, transparent); cursor: default; transition: background 120ms ease; }
+.thumb { position: absolute; border-radius: 99px; background: color-mix(in srgb, var(--text) 22%, transparent); cursor: default; transition: background-color var(--fade) var(--ease-out); }
 .thumb:hover, .thumb:active { background: color-mix(in srgb, var(--text) 38%, transparent); }
 .thumb.v { right: 3px; top: 0; width: 7px; }
 .thumb.h { left: 0; bottom: 3px; height: 7px; }
 .loading { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); font-variant-numeric: tabular-nums; background: var(--bg); }
-
-.status { display: grid; grid-template-columns: 1fr auto auto; align-items: center; gap: 20px; height: 38px; padding: 0 16px; border-top: 1px solid var(--line); background: var(--chrome); color: var(--muted); white-space: nowrap; }
-.status b { color: var(--text); font-weight: 600; }
-.status .err { color: var(--error); }
-.status .right { display: flex; align-items: center; gap: 6px; }
-.status button { height: 26px; padding: 0 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--muted); cursor: pointer; }
-.status button.on { color: var(--accent); border-color: rgba(var(--accent-rgb), 0.35); background: rgba(var(--accent-rgb), 0.06); }
-.status button:disabled { opacity: 0.5; cursor: default; }
-.status .frame { width: 92px; text-align: right; }
-
-.bench { position: fixed; right: 16px; bottom: 50px; width: 560px; max-width: calc(100vw - 32px); background: var(--bg); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 12px 40px rgb(0 0 0 / 0.12); overflow: hidden; }
-.benchhead { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; border-bottom: 1px solid var(--line); font-weight: 600; }
-.benchhead button { border: 0; background: none; color: var(--accent); cursor: pointer; }
-.bench table { width: 100%; border-collapse: collapse; }
-.bench th, .bench td { white-space: nowrap; padding: 7px 14px; text-align: right; border-bottom: 1px solid var(--line); }
-.bench th:first-child, .bench td:first-child { text-align: left; }
-.bench th { color: var(--muted); font-weight: 500; font-size: 12px; }
-.bench tr:last-child td { border-bottom: 0; }
-.status .recalc { overflow: hidden; text-overflow: ellipsis; }
-@media (max-width: 960px) { .status .sel, .status .frame { display: none; } .title { min-width: 0; } .title .meta { display: none; } }
-
-.try { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 8px 16px; border-bottom: 1px solid var(--line); background: var(--bg); }
-.try .guide { color: var(--text); min-width: 0; }
-.try .actions { display: flex; gap: 6px; flex-shrink: 0; }
-.try button { height: 28px; padding: 0 12px; border: 1px solid var(--line); border-radius: 999px; background: var(--bg); color: var(--text); cursor: pointer; white-space: nowrap; transition: background 120ms ease, border-color 120ms ease, transform 120ms ease; }
-.try button:hover { background: var(--chrome); border-color: color-mix(in srgb, var(--text) 20%, transparent); }
-.try button:active { transform: scale(0.97); }
-.try button:disabled { opacity: 0.4; cursor: default; }
-@media (max-width: 1100px) { .try { flex-direction: column; align-items: flex-start; } .try .actions { flex-wrap: wrap; } }
 .loading .reload { margin-left: 6px; border: 0; background: none; color: var(--accent); cursor: pointer; padding: 0; }
 
-/* In-cell editor: sits on the cell, grows with the text, like Excel and Sheets. */
+/* In-cell editor: sits on the cell, grows with the text, like Excel and Sheets. Same font as the formula bar. */
 .celledit:not(.open) { visibility: hidden; pointer-events: none; }
-.celledit { position: absolute; left: 0; top: 0; height: 26px; z-index: 2; margin: 0; padding: 0 7px; border: 2px solid var(--accent); border-radius: 0; background: var(--bg); color: var(--text); font: 13px var(--font); outline: none; box-shadow: 0 4px 14px rgb(0 0 0 / 0.12); }
-.bar .home { font-weight: 600; letter-spacing: -0.01em; color: var(--text); text-decoration: none; padding-right: 16px; border-right: 1px solid var(--line); }
-.bar .home:hover { color: var(--accent); }
+.celledit { position: absolute; left: 0; top: 0; height: 26px; z-index: 2; margin: 0; padding: 0 7px; border: 2px solid var(--accent); border-radius: 0; background: var(--bg); color: var(--text); font: 13px var(--font); font-variant-numeric: tabular-nums; outline: none; box-shadow: 0 4px 14px rgb(0 0 0 / 0.12); }
 
-.bar .open { height: 32px; padding: 0 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--text); font: inherit; cursor: pointer; white-space: nowrap; transition: transform 160ms cubic-bezier(0.23, 1, 0.32, 1), background 150ms ease; }
-.bar .open:hover { background: var(--chrome); }
-.bar .open:active { transform: scale(0.97); }
-.bar .open:disabled { opacity: 0.5; cursor: default; }
-.try code { font: 12px var(--mono); background: var(--chrome); border: 1px solid var(--line); border-radius: 5px; padding: 1px 5px; }
+/* ---------- Footer ---------- */
+.status { display: grid; grid-template-columns: 1fr auto auto; align-items: center; gap: 20px; height: 40px; padding: 0 16px; border-top: 1px solid var(--line); background: var(--chrome); color: var(--muted); white-space: nowrap; }
+.status b { color: var(--text); font-weight: 600; }
+.status .err { color: var(--error); }
+.status .recalc { overflow: hidden; text-overflow: ellipsis; }
+.status .right { display: flex; align-items: center; gap: 6px; }
+.status .ctl { color: var(--muted); }
+.status .ctl[aria-pressed="true"] { color: var(--accent); border-color: rgba(var(--accent-rgb), 0.35); background: rgba(var(--accent-rgb), 0.06); }
+.status .frame { width: 92px; text-align: right; }
+@media (max-width: 960px) { .status .sel, .status .frame { display: none; } }
+@media (max-width: 640px) { .status { grid-template-columns: minmax(0, 1fr); } .status .right { display: none; } }
 
-/* Import progress and the drop target. */
+/* ---------- Panels (benchmark, shortcuts): anchored, not modal ---------- */
+.panel {
+  position: fixed; right: 16px; bottom: 52px; width: 560px; max-width: calc(100vw - 32px); z-index: 10;
+  background: var(--bg); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 12px 40px rgb(0 0 0 / 0.12); overflow: hidden;
+  transform-origin: bottom right; transition: opacity 180ms var(--ease-out), transform 180ms var(--ease-out);
+  @starting-style { opacity: 0; transform: translateY(6px) scale(0.98); }
+}
+.panelhead { display: flex; justify-content: space-between; align-items: center; height: 44px; padding: 0 8px 0 14px; border-bottom: 1px solid var(--line); font-weight: 600; }
+.panel table { width: 100%; border-collapse: collapse; }
+.panel th, .panel td { white-space: nowrap; padding: 7px 14px; text-align: right; border-bottom: 1px solid var(--line); }
+.panel th:first-child, .panel td:first-child { text-align: left; }
+.panel th { color: var(--muted); font-weight: 500; font-size: 12px; }
+.panel tr:last-child td { border-bottom: 0; }
+.panel.keys { width: 420px; }
+.panel.keys td:last-child { text-align: right; }
+.panel.keys kbd { display: inline-block; min-width: 22px; padding: 1px 6px; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 5px; background: var(--chrome); color: var(--text); text-align: center; }
+.panel.keys .group td { padding-top: 12px; color: var(--muted); font-size: 12px; font-weight: 500; border-bottom: 0; text-align: left; }
+
+/* ---------- Import progress and the drop target ---------- */
 .importing { position: absolute; inset: 0; z-index: 3; display: grid; place-items: center; background: color-mix(in srgb, var(--bg) 82%, transparent); backdrop-filter: blur(6px); }
 .importCard { width: min(360px, calc(100% - 32px)); display: flex; flex-direction: column; gap: 8px; padding: 20px; border-radius: 14px; background: var(--bg); border: 1px solid var(--line); box-shadow: 0 12px 40px rgb(0 0 0 / 0.12); }
 .importName { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -88,3 +157,9 @@ button { font: inherit; }
 .importBar span { display: block; height: 100%; background: var(--accent); transform-origin: left; transition: transform 120ms linear; }
 .importNote { color: var(--muted); font-size: 12px; }
 .dropzone { position: absolute; inset: 12px; z-index: 3; display: grid; place-items: center; border: 2px dashed var(--accent); border-radius: 14px; background: rgba(var(--accent-rgb), 0.06); color: var(--accent); font-weight: 500; pointer-events: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  /* Keep colour and opacity changes; drop movement. */
+  .ctl:active:not(:disabled) { transform: none; }
+  .panel { transition: opacity 120ms linear; @starting-style { transform: none; } }
+}
